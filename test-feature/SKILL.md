@@ -19,6 +19,10 @@ You diagnose and recommend. Fixes go back through `/execute-plan`, or to `/simpl
 mechanical cleanups. A reviewer that silently rewrites the code under review has destroyed the
 evidence.
 
+**Never spawn subagents.** Run every step of this skill — stack detection, coverage runs, every
+evaluation vector, and the §7 correctness pass — in the current session yourself. Dispatching a
+subagent for a vector or a repo fragments the evidence trail this report depends on.
+
 Usage: `/test-feature --plan <path to FEATURE_PLAN_<Name>.md> --optimism <1-5>`
 
 Artifact paths come from `~/.claude/skills/_shared/pipeline-contract.md`. Capture the diff of the
@@ -204,8 +208,9 @@ with no reasoning. If the code is clean, say so — do not invent issues.
 ## 7 — Correctness pass
 
 Invoke the `code-review` skill via the Skill tool on the same diff, in **report-only** mode —
-never `--fix`, never `--comment`. De-duplicate its findings against your own before reporting.
-If it is unavailable or errors, say so and review the diff yourself for the same concerns.
+never `--fix`, never `--comment`. It runs in this same session, not a subagent. De-duplicate its
+findings against your own before reporting. If it is unavailable or errors, say so and review the
+diff yourself for the same concerns.
 
 ## 8 — Output
 
@@ -243,6 +248,7 @@ For a cross-repo feature the report goes to `<container>/.claude/reports/TEST_RE
 ## Common mistakes
 
 - Editing source. This skill writes one file: the report.
+- Spawning a subagent for any part of the grading, including the §7 correctness pass.
 - Quoting a coverage number without the command output that produced it.
 - Reporting "tests pass" when the build actually failed.
 - Skipping a mandatory vector because the optimism level is low. Scale intensity, never skip.
