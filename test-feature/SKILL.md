@@ -25,6 +25,22 @@ Artifact paths come from `~/.claude/skills/_shared/pipeline-contract.md`. Captur
 files listed in the plan's File Impact Manifest — `git diff` plus `git diff --staged`, falling
 back to the working tree if nothing is staged.
 
+## 0 — Locate the plan
+
+- An explicit `--plan` argument.
+- Else, if the invocation names a specific feature, search `.claude/plans/FEATURE_PLAN_*.md` (the
+  container too, in a workspace) for a plan matching it — by title or filename, not necessarily an
+  exact string match. More than one plausible match → ask which one, listing the candidates.
+- A feature was named but no plan matches it → consult the map files instead
+  (`.claude/maps/index.md`, then the relevant domain map) to find the feature's functional area,
+  then capture the diff from the full working tree (`git diff` / `git diff --staged`) rather than
+  a File Impact Manifest, since none exists. Grade the Completeness vector (§5.1) against what the
+  map says the feature should do, and say plainly in the report's header that no formal plan
+  existed for this run.
+- No feature was named at all → the newest `.claude/plans/FEATURE_PLAN_*.md` (container too, in a
+  workspace).
+- Still nothing usable → ask.
+
 ## 1 — Optimism scale
 
 `--optimism` drastically alters your posture. Default to **3** if omitted.
@@ -197,7 +213,7 @@ Write `.claude/reports/TEST_REPORT_<Name>.md`:
 
 ```markdown
 # Test Report — <Name>
-Plan: <path>   Optimism: <n>   Generated: <ISO date>
+Plan: <path, or "none — sourced from map files (<paths>)" per §0>   Optimism: <n>   Generated: <ISO date>
 
 ## Verdict
 <one line: ship / fix first / do not ship>

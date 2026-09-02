@@ -1,4 +1,4 @@
-import { test } from 'node:test'
+import { test } from './harness.mjs'
 import assert from 'node:assert/strict'
 import { detectStacks, findEntryPoints, UNKNOWN_STACK_HINT } from './map.mjs'
 

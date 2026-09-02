@@ -1,15 +1,24 @@
 #!/usr/bin/env node
 // map.mjs — deterministic repository scanning for the map-codebase skill.
 // Does every part of mapping that can be answered without a model, at zero token cost.
-// No dependencies: node: builtins only.
+// No dependencies: node: builtins only. Runs on Node 16+.
 
 import fs from 'node:fs'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 
+// Directories that are build output, dependency caches, or tool state. Anything gitignored is
+// already excluded by listFiles(); this list is the fallback for trees git cannot answer for,
+// and a second belt for repos that never ignored their own build output.
 export const PRUNE = new Set([
-  'node_modules', '.git', 'bin', 'obj', 'dist', 'build', '.vs', 'packages', 'coverage'
+  'node_modules', '.git', 'bin', 'obj', 'dist', 'build', '.vs', 'packages', 'coverage',
+  // Added after a real scan walked 12 gitignored files out of 14: language and framework
+  // caches no repo wants mapped, which discoverEdges would otherwise read in full.
+  '.venv', 'venv', '.tox', '__pycache__', '.pytest_cache', '.mypy_cache',
+  'vendor', 'target', '.next', '.nuxt', '.svelte-kit', 'out', '.output',
+  '.gradle', '.idea', '.dart_tool', '.terraform', '.angular', '.parcel-cache',
+  'Pods', 'DerivedData', '.cache', '.turbo', 'TestResults'
 ])
 
 /** Absolute path of the nearest ancestor containing .git, or null. */
@@ -42,12 +51,65 @@ export function walk (root) {
   return out.sort()
 }
 
+/**
+ * A directory's canonical absolute path.
+ *
+ * On Windows a path may arrive in 8.3 short form (C:\Users\JASON_~1\...) while git and realpath
+ * return the long form. Comparing or subtracting the two forms without canonicalising produces
+ * "different directory" for the same directory, and a path.relative() full of `../..`.
+ */
+function realDir (p) {
+  try { return fs.realpathSync.native(p) } catch { return path.resolve(p) }
+}
+
+function sameDir (a, b) {
+  const x = realDir(a)
+  const y = realDir(b)
+  return process.platform === 'win32' ? x.toLowerCase() === y.toLowerCase() : x === y
+}
+
+function git (root, args, maxBuffer = 64 * 1024 * 1024) {
+  try {
+    return execFileSync('git', args, {
+      cwd: root, stdio: ['ignore', 'pipe', 'ignore'], maxBuffer
+    }).toString()
+  } catch { return null }
+}
+
+/**
+ * Tracked and untracked-but-not-ignored files, repo-relative and POSIX-separated.
+ *
+ * git is the authority on what belongs to a repo. A hardcoded prune list cannot know that this
+ * particular repo keeps its dependencies in vendor/, its build in target/, or its virtualenv in
+ * .venv/ — and walking those inflates fileCount, invents stacks (a vendored Go module adds "go"),
+ * and makes discoverEdges read tens of thousands of files it should never open.
+ *
+ * Falls back to walk() when git cannot answer: a fixture with a fake .git, an empty repo, or git
+ * missing from PATH.
+ */
+export function listFiles (root) {
+  const top = git(root, ['rev-parse', '--show-toplevel'], 1 << 20)
+  // Refuse a parent repo's answer: if root is not itself the repo root, git would list files
+  // belonging to an enclosing repository.
+  if (top && sameDir(top.trim(), root)) {
+    const out = git(root, ['ls-files', '-co', '--exclude-standard', '--full-name', '-z'])
+    if (out !== null) {
+      const files = out.split('\0').filter(Boolean).map(f => f.replace(/\\/g, '/'))
+        .filter(f => !f.split('/').some(seg => PRUNE.has(seg)))
+        .sort()
+      if (files.length) return files
+    }
+  }
+  return walk(root)
+}
+
 const base = f => path.posix.basename(f)
 
 const STACK_MARKERS = [
   ['dotnet', f => f.endsWith('.csproj') || f.endsWith('.sln') || f.endsWith('.fsproj')],
   ['flutter', f => base(f) === 'pubspec.yaml'],
   ['node', f => base(f) === 'package.json'],
+  ['deno', f => ['deno.json', 'deno.jsonc'].includes(base(f))],
   ['python', f => ['pyproject.toml', 'pytest.ini', 'requirements.txt', 'setup.py',
                    'setup.cfg', 'Pipfile'].includes(base(f))],
   ['go', f => base(f) === 'go.mod'],
@@ -63,17 +125,32 @@ const STACK_MARKERS = [
                 'settings.gradle', 'settings.gradle.kts'].includes(base(f))]
 ]
 
+// Infrastructure is reported separately from application stacks. Folding "docker" into stacks
+// would make a .NET service claim two stacks and confuse downstream build-command inference;
+// omitting it entirely made a pure-Terraform repo look unrecognised.
+const INFRA_MARKERS = [
+  ['docker', f => base(f) === 'Dockerfile' || /^Dockerfile\./.test(base(f)) ||
+                  /^(docker-)?compose(\.[\w-]+)?\.ya?ml$/.test(base(f))],
+  ['terraform', f => f.endsWith('.tf') || f.endsWith('.tfvars')],
+  ['bicep', f => f.endsWith('.bicep')],
+  ['kubernetes', f => base(f) === 'Chart.yaml' || /(^|\/)(k8s|kubernetes|helm|charts)\//i.test(f)]
+]
+
 export const UNKNOWN_STACK_HINT =
   'Unrecognised stack: no known build manifest was found. Say so in the map rather than ' +
   'guessing — name the file extensions actually present, and ask the user for the build and ' +
   'test commands instead of inferring them.'
 
 const ENTRY_NAMES = new Set([
-  'Program.cs', 'Startup.cs', 'main.dart', 'main.rs', 'manage.py', 'wsgi.py', 'asgi.py',
-  'config.ru', 'artisan', 'main.swift', 'main.cpp', 'main.go'
+  'Program.cs', 'Startup.cs', 'Program.fs', 'main.dart', 'main.rs', 'manage.py', 'wsgi.py',
+  'asgi.py', '__main__.py', 'config.ru', 'artisan', 'main.swift', 'main.cpp', 'main.go'
 ])
 const ENTRY_STEMS = new Set(['index', 'server', 'main', 'app'])
-const ENTRY_EXTS = new Set(['.ts', '.js', '.mjs', '.py', '.go', '.php', '.rb', '.rs'])
+// .tsx/.jsx were missing, so every React and modern-Angular frontend reported no entry point at
+// all — in a skill whose workspace story is frontend-to-backend.
+const ENTRY_EXTS = new Set([
+  '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.go', '.php', '.rb', '.rs'
+])
 // Frameworks that name their entry class rather than their file.
 const ENTRY_PATTERNS = [/Application\.(java|kt|scala)$/, /(^|\/)Main\.(java|kt|scala)$/]
 
@@ -87,16 +164,27 @@ export function detectStacks (files) {
   // distinguishes them; without it, a Gradle build is a JVM build. Reporting a Spring Boot
   // service as "android" is worse than reporting nothing.
   if (hit.has('android')) hit.delete('jvm')
-  // Flutter projects carry a pubspec and often a package.json for tooling; the pubspec wins.
-  if (hit.has('flutter')) hit.delete('dart')
+  return [...hit].sort()
+}
+
+/** Sorted unique infrastructure technologies present in the file list. */
+export function detectInfra (files) {
+  const hit = new Set()
+  for (const f of files) {
+    for (const [name, match] of INFRA_MARKERS) if (match(f)) hit.add(name)
+  }
   return [...hit].sort()
 }
 
 /**
- * Files that look like application entry points.
+ * Files that look like application entry points, shallowest first.
+ *
  * When `root` is supplied, package.json's declared `main` (and `scripts.start` target) wins over
  * filename guessing — Node services routinely name their entry `app.js`, which no heuristic
  * would rank above any other file.
+ *
+ * Depth ordering matters because callers cap the list: src/main.tsx is a likelier entry than
+ * src/features/orders/components/index.ts, and alphabetical order cannot tell them apart.
  */
 export function findEntryPoints (files, root) {
   const out = new Set()
@@ -121,10 +209,12 @@ export function findEntryPoints (files, root) {
     if (ENTRY_NAMES.has(name)) { out.add(f); continue }
     if (ENTRY_PATTERNS.some(re => re.test(f))) { out.add(f); continue }
     const ext = path.posix.extname(name)
-    if (ENTRY_EXTS.has(ext) && ENTRY_STEMS.has(name.slice(0, -ext.length))) out.add(f)
+    // Case-insensitive stem: App.tsx, Index.js and Main.ts are entry points too.
+    if (ENTRY_EXTS.has(ext) && ENTRY_STEMS.has(name.slice(0, -ext.length).toLowerCase())) out.add(f)
   }
 
-  return [...out].sort()
+  return [...out].sort((a, b) =>
+    a.split('/').length - b.split('/').length || a.localeCompare(b))
 }
 
 /** Pull a script path out of an npm start command, e.g. "node app.js --port 3000" -> "app.js". */
@@ -148,12 +238,12 @@ const MAX_DOC_DEPTH = 3
  */
 export function findProjectDocs (files) {
   const rank = f => {
-    const base = path.posix.basename(f).toLowerCase()
+    const b = path.posix.basename(f).toLowerCase()
     const depth = f.split('/').length
     if (depth > MAX_DOC_DEPTH) return null
-    if (AGENT_DOCS.includes(base)) return 0
-    if (HUMAN_DOCS.includes(base)) return 1
-    if (/^docs?\//i.test(f) && base.endsWith('.md')) return 2
+    if (AGENT_DOCS.includes(b)) return 0
+    if (HUMAN_DOCS.includes(b)) return 1
+    if (/^docs?\//i.test(f) && b.endsWith('.md')) return 2
     return null
   }
   return files
@@ -168,186 +258,378 @@ export function findProjectDocs (files) {
 export function findTestAndCi (files) {
   const tests = files.filter(f =>
     /(^|\/)(tests?|spec)\//i.test(f) || /\.(tests?|spec)\.[a-z]+$/i.test(f) ||
-    /(Tests?|Spec)\.csproj$/.test(f) || /_test\.(dart|go|py)$/.test(f)
+    /(Tests?|Spec)\.csproj$/.test(f) || /_test\.(dart|go|py|exs?)$/.test(f) ||
+    // xUnit and JUnit name the class, not the directory: OrderServiceTests.cs, FooTest.java.
+    /(^|\/)[A-Z][\w]*Tests?\.(cs|java|kt|scala|fs)$/.test(f) ||
+    // pytest's other convention, and RSpec.
+    /(^|\/)test_[^/]+\.py$/.test(f) || /_spec\.rb$/.test(f)
   ).sort()
   const ci = files.filter(f =>
     /(^|\/)azure-pipelines[^/]*\.ya?ml$/i.test(f) ||
     /^\.github\/workflows\/[^/]+\.ya?ml$/i.test(f) ||
-    /(^|\/)\.gitlab-ci\.ya?ml$/i.test(f)
+    /(^|\/)\.gitlab-ci\.ya?ml$/i.test(f) ||
+    /(^|\/)Jenkinsfile[^/]*$/.test(f) ||
+    /(^|\/)\.circleci\/config\.ya?ml$/i.test(f) ||
+    /(^|\/)bitbucket-pipelines\.ya?ml$/i.test(f) ||
+    /(^|\/)\.(travis|drone|appveyor)\.ya?ml$/i.test(f) ||
+    /(^|\/)appveyor\.ya?ml$/i.test(f)
   ).sort()
   return { tests, ci }
 }
 
 /**
- * Repo-relative paths cited in backticks in a map file.
- * A token counts only if it contains a slash, has a file extension, and is glob-free —
- * which excludes prose, globs, and bare command names, keeping --verify free of false
- * positives. cleanup-crew gates on this exit code, so precision beats recall here.
+ * Directory shape: the top levels of the tree with file counts and dominant extensions.
+ *
+ * Without this the model has no structural data at all — it is told not to re-walk the tree, then
+ * asked to carve the repo into domains. This is the deterministic half of that judgement.
  */
-export function citedPaths (mapText) {
+export function buildTree (files, { depth = 2, limit = 40 } = {}) {
+  const dirs = new Map()
+  for (const f of files) {
+    const parts = f.split('/')
+    const key = parts.length === 1
+      ? '.'
+      : parts.slice(0, Math.min(depth, parts.length - 1)).join('/')
+    if (!dirs.has(key)) dirs.set(key, { dir: key, files: 0, ext: new Map() })
+    const e = dirs.get(key)
+    e.files++
+    const x = path.posix.extname(f).toLowerCase() || '(none)'
+    e.ext.set(x, (e.ext.get(x) ?? 0) + 1)
+  }
+  const all = [...dirs.values()]
+    .sort((a, b) => b.files - a.files || a.dir.localeCompare(b.dir))
+    .map(e => ({
+      dir: e.dir,
+      files: e.files,
+      exts: [...e.ext.entries()]
+        .sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, v]) => k + ' ' + v)
+    }))
+  return limit && all.length > limit
+    ? { dirs: all.slice(0, limit), omitted: all.length - limit }
+    : { dirs: all, omitted: 0 }
+}
+
+// ------------------------------------------------------------------- citations
+
+// A scheme prefix ("https:") or a Windows drive letter ("C:") means the token is not a
+// repo-relative path. Left unfiltered, a URL in a map resolved to nothing and reported permanent
+// drift — which gates cleanup-crew's commits until someone finds it by hand.
+const NOT_A_REPO_PATH = /^[A-Za-z][A-Za-z0-9+.-]*:/
+
+/**
+ * Repo-relative paths cited in backticks in a map file.
+ *
+ * A token counts only if it contains a slash, has a file extension, is glob-free, and is neither
+ * a URL nor an absolute path — which excludes prose, globs, and bare command names, keeping
+ * --verify free of false positives. cleanup-crew gates on this exit code, so precision beats
+ * recall here.
+ *
+ * Tokens containing spaces are returned only under `withSpaces`: a real path may contain a space
+ * (src/My Project/Program.cs), but so does every shell command, and no rule separates them
+ * reliably. verifyMaps reports those separately and never fails the build on one.
+ */
+export function citedPaths (mapText, { withSpaces = false } = {}) {
   const out = new Set()
   for (const m of mapText.matchAll(/`([^`\n]+)`/g)) {
     const t = m[1].trim()
     if (!t.includes('/')) continue
-    // Globs and placeholders describe a shape, not a file: `src/**/*.cs`, `services/<area>.ts`,
-    // `api/{id}/thing.ts`. None of them can be resolved, so none of them are citations.
-    if (/[*<>{}]/.test(t) || t.includes(' ')) continue
+    // Globs and placeholders describe a shape, not a file: src/**/*.cs, services/<area>.ts,
+    // api/{id}/thing.ts. None of them can be resolved, so none of them are citations.
+    if (/[*<>{}]/.test(t)) continue
+    if (t.includes(' ') !== withSpaces) continue
+    // Shell metacharacters and flag arguments mean this is a command, not a path.
+    if (/[|;&$"']/.test(t) || /(^|\s)-{1,2}\w/.test(t)) continue
     // Parent-relative paths cannot be resolved against a repo root — a map that needs to point
     // outside its own repo should name the other repo explicitly instead.
     if (t.startsWith('../') || t.includes('/../')) continue
+    if (t.startsWith('/') || NOT_A_REPO_PATH.test(t)) continue
     if (!/\.[A-Za-z0-9]+$/.test(t)) continue
     out.add(t.replace(/^\.\//, ''))
   }
   return [...out].sort()
 }
 
-/** Resolve every path cited by every map; any that no longer exists is drift. */
-export function verifyMaps (root) {
-  const mapsDir = path.join(root, '.claude', 'maps')
-  const drift = []
-  if (!fs.existsSync(mapsDir)) return { ok: true, drift }
-  const mapFiles = walk(mapsDir).filter(f => f.endsWith('.md'))
-  for (const rel of mapFiles) {
-    const text = fs.readFileSync(path.join(mapsDir, rel), 'utf8')
-    for (const cited of citedPaths(text)) {
-      if (!fs.existsSync(path.join(root, cited))) {
-        drift.push({ map: `.claude/maps/${rel}`, missing: cited })
+// ---------------------------------------------------------- read-only guardrail
+
+const SHELL_LANGS = new Set([
+  'sh', 'bash', 'zsh', 'shell', 'console', 'powershell', 'pwsh', 'ps1', 'cmd', 'bat', 'batch',
+  'dos', 'terminal'
+])
+
+const SECRET_PATTERNS = [
+  [/\b(?:sk|rk)-[A-Za-z0-9]{16,}\b/, 'api key'],
+  [/\bghp_[A-Za-z0-9]{20,}\b/, 'github token'],
+  [/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/, 'slack token'],
+  [/\bAKIA[0-9A-Z]{16}\b/, 'aws access key id'],
+  [/\bey[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/, 'jwt'],
+  [/(?:Server|Data Source|Host)\s*=[^\n]{0,120}?(?:Password|Pwd)\s*=/i, 'connection string'],
+  [/\b[a-z][a-z0-9+.-]*:\/\/[^\s`/@:]+:[^\s`/@]+@/i, 'secret embedded in a url']
+]
+
+// The one region of a map allowed to carry commands. See the read-only guardrail in
+// pipeline-contract.md: build and test commands are recorded as DATA for downstream stages
+// (/test-feature needs the command, and guessing it is worse than recording it), never as an
+// instruction the reading run should execute.
+const COMMANDS_SECTION = /^##+\s*Build (?:&|and) test commands\s*$/i
+
+/**
+ * Read-only guardrail violations in a map: shell blocks and secret-shaped strings.
+ *
+ * Returns [{ line, kind, detail }]. Purely deterministic. The model was the only enforcement
+ * before this, and a model cannot enforce a rule against a map it has not read.
+ */
+export function lintMapText (text) {
+  const hits = []
+  const lines = text.split('\n')
+  let fence = null
+  let exempt = false
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    const fenceMatch = line.match(/^\s*(```+|~~~+)\s*([\w+-]*)/)
+    if (fenceMatch) {
+      if (fence === null) {
+        fence = fenceMatch[1][0]
+        const lang = fenceMatch[2].toLowerCase()
+        if (!exempt && SHELL_LANGS.has(lang)) {
+          hits.push({ line: i + 1, kind: 'command', detail: lang + ' code block' })
+        }
+      } else if (line.trim().startsWith(fence)) {
+        fence = null
       }
+      continue
+    }
+    if (fence === null && /^##+\s/.test(line)) exempt = COMMANDS_SECTION.test(line)
+    if (exempt) continue
+    for (const [re, kind] of SECRET_PATTERNS) {
+      if (re.test(line)) { hits.push({ line: i + 1, kind: 'secret', detail: kind }); break }
     }
   }
-  return { ok: drift.length === 0, drift }
+  return hits
+}
+
+// -------------------------------------------------------------------- map state
+
+/** The `Generated:` header of a map — its date and, when present, the commit it described. */
+export function mapHeader (text) {
+  const head = text.split('\n').slice(0, 30).join('\n')
+  const m = head.match(
+    /^[\s>*-]*(?:\*\*)?Generated:?(?:\*\*)?[:\s]*(\d{4}-\d{2}-\d{2}(?:[T ][\d:.Z+-]+)?)\s*(?:\(([0-9a-fA-F]{7,40})\))?/im
+  )
+  if (!m) return { generated: null, sha: null }
+  return { generated: m[1], sha: m[2] ? m[2].toLowerCase() : null }
+}
+
+function ageInDays (iso, now) {
+  const t = Date.parse(iso)
+  if (Number.isNaN(t)) return null
+  return Math.floor((now - t) / 86400000)
+}
+
+/** Every map file under .claude/maps, with its citations, ownership prefixes and header. */
+export function mapOwnership (root) {
+  const mapsDir = path.join(root, '.claude', 'maps')
+  if (!fs.existsSync(mapsDir)) return []
+  return walk(mapsDir).filter(f => f.endsWith('.md')).map(rel => {
+    let text = ''
+    try { text = fs.readFileSync(path.join(mapsDir, rel), 'utf8') } catch { /* unreadable */ }
+    const cited = citedPaths(text)
+    // A map citing src/Orders/Foo.cs owns src/Orders/ — otherwise a NEW file in an already-mapped
+    // domain belongs to no map, and --update silently skips the domain it changed.
+    const prefixes = [...new Set(cited.map(c => {
+      const d = path.posix.dirname(c)
+      return d === '.' ? '' : d + '/'
+    }))].filter(Boolean).sort((a, b) => b.length - a.length)
+    return {
+      map: '.claude/maps/' + rel.replace(/\\/g, '/'),
+      cited,
+      prefixes,
+      text,
+      ...mapHeader(text)
+    }
+  })
+}
+
+/** Assign changed files to the map that owns them: exact citation first, then longest prefix. */
+export function assignChanges (owners, changed) {
+  const byMap = new Map(owners.map(o => [o.map, []]))
+  const unowned = []
+  for (const f of changed) {
+    let hit = owners.find(o => o.cited.includes(f))
+    if (!hit) {
+      let best = null
+      for (const o of owners) {
+        for (const p of o.prefixes) {
+          if (f.startsWith(p) && (!best || p.length > best.len)) best = { o, len: p.length }
+        }
+      }
+      hit = best?.o
+    }
+    if (hit) byMap.get(hit.map).push(f)
+    else unowned.push(f)
+  }
+  return { byMap, unowned }
 }
 
 /**
- * Files changed vs HEAD: unstaged, staged, and untracked-but-not-ignored.
+ * Resolve every path cited by every map; any that no longer resolves is drift.
+ *
+ * Three failure modes this catches that a plain existsSync did not:
+ *  - case drift — src/program.cs for src/Program.cs passes existsSync on Windows and macOS, then
+ *    breaks every Linux consumer of the map;
+ *  - a map with no citations at all, which passed trivially while documenting nothing;
+ *  - commands and secrets in a map, which the guardrail forbade and nothing detected.
+ */
+export function verifyMaps (root, { maxAgeDays = 14, now = Date.now() } = {}) {
+  const drift = []
+  const unverified = []
+  const guardrail = []
+  const maps = []
+  const mapsDir = path.join(root, '.claude', 'maps')
+  if (!fs.existsSync(mapsDir)) {
+    return { ok: true, drift, unverified, guardrail, maps, emptyMaps: [], staleMaps: [] }
+  }
+
+  // Canonicalised, so path.relative() below subtracts like-for-like on Windows short paths.
+  const realRoot = realDir(root)
+  // Indexed by lowercase name, and used ONLY to give a wrong-case citation a better message on a
+  // case-sensitive filesystem. It is never used to decide that a path exists: git ls-files reads
+  // the index, so a file deleted from the working tree is still listed, and trusting it would let
+  // the commonest drift of all — someone deleted the file — pass as clean.
+  const byLower = new Map()
+  for (const f of listFiles(root)) byLower.set(f.toLowerCase(), f)
+
+  const resolve = cited => {
+    const abs = path.join(root, cited)
+    if (!fs.existsSync(abs)) {
+      const match = byLower.get(cited.toLowerCase())
+      if (match && match !== cited) return { ok: false, reason: 'case mismatch', actual: match }
+      return { ok: false, reason: 'missing' }
+    }
+    // On a case-insensitive filesystem existsSync says yes to the wrong case, so ask the OS what
+    // the file is really called. Only a pure case difference is drift — a symlink resolving
+    // elsewhere is not.
+    let real = null
+    try { real = fs.realpathSync.native(abs) } catch { /* fall through */ }
+    if (real) {
+      const rel = path.relative(realRoot, real).split(path.sep).join('/')
+      if (rel && rel !== cited && rel.toLowerCase() === cited.toLowerCase()) {
+        return { ok: false, reason: 'case mismatch', actual: rel }
+      }
+    }
+    return { ok: true }
+  }
+
+  for (const o of mapOwnership(root)) {
+    let missing = 0
+    for (const cited of o.cited) {
+      const r = resolve(cited)
+      if (!r.ok) {
+        const entry = { map: o.map, missing: cited, reason: r.reason }
+        if (r.actual) entry.actual = r.actual
+        drift.push(entry)
+        missing++
+      }
+    }
+    for (const spaced of citedPaths(o.text, { withSpaces: true })) {
+      if (!resolve(spaced).ok) {
+        unverified.push({
+          map: o.map, path: spaced, note: 'contains a space; not treated as drift'
+        })
+      }
+    }
+    for (const hit of lintMapText(o.text)) guardrail.push({ map: o.map, ...hit })
+    const age = o.generated ? ageInDays(o.generated, now) : null
+    maps.push({
+      map: o.map,
+      cited: o.cited.length,
+      missing,
+      generated: o.generated,
+      sha: o.sha,
+      ageDays: age,
+      stale: age === null || age > maxAgeDays
+    })
+  }
+
+  return {
+    ok: drift.length === 0 && guardrail.length === 0,
+    drift,
+    unverified,
+    guardrail,
+    maps,
+    emptyMaps: maps.filter(m => m.cited === 0 && !m.map.endsWith('/index.md')).map(m => m.map),
+    staleMaps: maps.filter(m => m.stale).map(m => m.map)
+  }
+}
+
+/**
+ * Files changed vs a baseline: unstaged, staged, and untracked-but-not-ignored.
+ *
+ * `since` is the commit a map was generated against. Without it the comparison is against HEAD,
+ * which meant /map-codebase --update did nothing at all once the work was committed — the single
+ * commonest moment to refresh a map.
+ *
  * Returns [] when git is unavailable or the directory is not a repo.
  */
-export function changedFiles (root) {
+export function changedFiles (root, since) {
   const run = args => {
-    try {
-      return execFileSync('git', args, { cwd: root, stdio: ['ignore', 'pipe', 'ignore'] })
-        .toString().split('\n').map(s => s.trim()).filter(Boolean)
-    } catch { return null }
+    const out = git(root, args)
+    return out === null ? null : out.split('\n').map(s => s.trim()).filter(Boolean)
   }
-  const parts = [
-    run(['diff', '--name-only', 'HEAD']),
-    run(['diff', '--name-only', '--staged']),
-    run(['ls-files', '--others', '--exclude-standard'])
-  ]
+  const usable = Boolean(since) && git(root, ['cat-file', '-e', since + '^{commit}'], 65536) !== null
+  const parts = usable
+    ? [run(['diff', '--name-only', since]), run(['ls-files', '--others', '--exclude-standard'])]
+    : [
+        run(['diff', '--name-only', 'HEAD']),
+        run(['diff', '--name-only', '--staged']),
+        run(['ls-files', '--others', '--exclude-standard'])
+      ]
   if (parts.every(p => p === null)) return []
   return [...new Set(parts.filter(Boolean).flat())].sort()
 }
 
-function cli (argv) {
-  const cmd = argv[0]
-  const rootFlag = argv.indexOf('--root')
-  const start = rootFlag !== -1 ? argv[rootFlag + 1] : process.cwd()
-  const wantWorkspace = argv.includes('--workspace')
+// --------------------------------------------------------------------- ignores
 
-  // ---- workspace-scoped commands, which operate on a container rather than one repo ----
+export const GITIGNORE_ENTRIES = ['.claude/maps/', '.claude/plans/', '.claude/reports/']
 
-  if (cmd === 'workspace' || cmd === 'edges' || (cmd === 'verify' && wantWorkspace)) {
-    const ws = findWorkspace(start)
-    if (!ws) {
-      process.stdout.write(JSON.stringify({
-        error: 'not a workspace',
-        start: path.resolve(start),
-        hint: 'A workspace is a directory holding 2+ git repos. A single repo, or a folder of ' +
-              'unrelated products, is not one. Add .claude-workspace.json to declare it explicitly.'
-      }, null, 2) + '\n')
-      return 4
-    }
-
-    if (cmd === 'workspace') {
-      process.stdout.write(JSON.stringify({
-        root: ws.root,
-        name: ws.name,
-        configured: Boolean(ws.config),
-        repos: ws.repos.map(r => {
-          const files = walk(r.path)
-          const { tests, ci } = findTestAndCi(files)
-          return {
-            name: r.name,
-            role: r.role,
-            fileCount: files.length,
-            stacks: detectStacks(files),
-            projectDocs: findProjectDocs(files),
-            entryPoints: findEntryPoints(files, r.path).slice(0, 5),
-            hasTests: tests.length > 0,
-            hasCi: ci.length > 0
-          }
-        })
-      }, null, 2) + '\n')
-      return 0
-    }
-
-    if (cmd === 'edges') {
-      const { edges, internal } = discoverEdges(ws.repos)
-      process.stdout.write(JSON.stringify({
-        root: ws.root, name: ws.name, edgeCount: edges.length, edges, internalCount: internal.length
-      }, null, 2) + '\n')
-      return 0
-    }
-
-    // verify --workspace: every repo, plus the container's own workspace map.
-    const results = ws.repos.map(r => ({ repo: r.name, ...verifyMaps(r.path) }))
-    const wsLevel = verifyMaps(ws.root)
-    const drifted = results.filter(r => !r.ok)
-    const ok = drifted.length === 0 && wsLevel.ok
-    process.stdout.write(JSON.stringify({
-      root: ws.root, ok, workspaceMap: wsLevel, repos: results
-    }, null, 2) + '\n')
-    return ok ? 0 : 1
+/** Which pipeline artifact directories the repo's .gitignore does not yet cover. */
+export function gitignoreStatus (root) {
+  const p = path.join(root, '.gitignore')
+  const exists = fs.existsSync(p)
+  let lines = []
+  if (exists) {
+    lines = fs.readFileSync(p, 'utf8').split(/\r?\n/)
+      .map(l => l.trim())
+      .filter(l => l && !l.startsWith('#'))
+      .map(l => l.replace(/^\//, '').replace(/\/+$/, ''))
   }
-
-  // ---- repo-scoped commands ----
-
-  // Refuse outside a repo rather than falling back to the start directory. A container of
-  // unrelated repos (e.g. ~/Projects) would otherwise scan tens of thousands of files and
-  // report several stacks as if they were one system.
-  const root = findRepoRoot(start)
-  if (root === null && cmd !== undefined && ['scan', 'update', 'verify'].includes(cmd)) {
-    process.stdout.write(JSON.stringify({
-      error: 'not a git repository',
-      start: path.resolve(start),
-      hint: 'Run from inside a repo. A folder holding several repos is not itself a repo.'
-    }, null, 2) + '\n')
-    return 3
+  const covers = e => {
+    const t = e.replace(/\/+$/, '')
+    return lines.some(l => l === t || l === '.claude' || l === t + '/**' || l === t + '/*')
   }
-
-  if (cmd === 'scan') {
-    const files = walk(root)
-    const { tests, ci } = findTestAndCi(files)
-    process.stdout.write(JSON.stringify({
-      root, fileCount: files.length, stacks: detectStacks(files),
-      // Listed before everything else: read these before inferring anything.
-      projectDocs: findProjectDocs(files),
-      entryPoints: findEntryPoints(files, root), tests, ci
-    }, null, 2) + '\n')
-    return 0
-  }
-  if (cmd === 'update') {
-    process.stdout.write(JSON.stringify({ root, changed: changedFiles(root) }, null, 2) + '\n')
-    return 0
-  }
-  if (cmd === 'verify') {
-    const r = verifyMaps(root)
-    process.stdout.write(JSON.stringify({ root, ...r }, null, 2) + '\n')
-    return r.ok ? 0 : 1
-  }
-  process.stderr.write(
-    'usage: map.mjs <scan|update|verify|workspace|edges> [--root <dir>] [--workspace]\n' +
-    '  scan|update|verify   operate on one repo\n' +
-    '  workspace            repo inventory for a container of 2+ repos\n' +
-    '  edges                cross-repo integration candidates\n' +
-    '  verify --workspace   drift across every repo in the workspace\n')
-  return 2
+  return { path: '.gitignore', exists, missing: GITIGNORE_ENTRIES.filter(e => !covers(e)) }
 }
 
-// (CLI entry point lives at the very end of this file — everything it references must be
-// initialised first, or const declarations below would be in the temporal dead zone.)
+/**
+ * Append the missing artifact directories, creating .gitignore if absent.
+ *
+ * Appends only — never rewrites, never reorders, and preserves the file's existing line endings.
+ * This is the one mutation the skill performs, so it stays narrow and auditable.
+ */
+export function ensureGitignore (root) {
+  const st = gitignoreStatus(root)
+  if (st.missing.length === 0) return { ...st, written: false }
+  const p = path.join(root, '.gitignore')
+  const prev = st.exists ? fs.readFileSync(p, 'utf8') : ''
+  const eol = /\r\n/.test(prev) ? '\r\n' : '\n'
+  const lead = prev === '' ? '' : (prev.endsWith('\n') ? eol : eol + eol)
+  fs.appendFileSync(
+    p,
+    lead + '# Claude Code pipeline artifacts' + eol + st.missing.map(e => e + eol).join('')
+  )
+  return { ...st, written: true }
+}
 
-// ------------------------------------------------------------------ workspace
+// ------------------------------------------------------------------- workspace
 
 export const WORKSPACE_CONFIG = '.claude-workspace.json'
 
@@ -431,10 +713,16 @@ export function findWorkspace (startDir) {
 
 // -------------------------------------------------------------- edge discovery
 
+// php and ruby were declared stacks whose source was never scanned for edges; template-first
+// frameworks keep their HTTP calls in .vue/.svelte/.razor/.cshtml files.
 const SOURCE_EXTS = new Set([
-  '.cs', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.java', '.kt', '.dart', '.py', '.go'
+  '.cs', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.java', '.kt', '.dart', '.py', '.go',
+  '.php', '.rb', '.rs', '.scala', '.swift', '.vue', '.svelte', '.razor', '.cshtml'
 ])
 const MAX_SOURCE_BYTES = 512 * 1024
+// A frontend/backend pair yields ~100 route edges. At 20 sites each that is 2,000 records handed
+// to the model *before* it is told to summarise — the opposite of this script's purpose.
+const DEFAULT_MAX_SITES = 3
 
 // Each matcher yields the identifier two repos would have in common. Values are never captured
 // from configuration files — the global ignore list bars reading them — so an HTTP target is
@@ -484,13 +772,14 @@ function routeSegments (raw) {
  * coupling); `internal` are seen in exactly one. These are CANDIDATES for a model to confirm
  * and describe — the script asserts only that the same string appears in both places.
  */
-export function discoverEdges (repos) {
+export function discoverEdges (repos, { maxSites = DEFAULT_MAX_SITES } = {}) {
   const seen = new Map()
 
   for (const repo of repos) {
     if (!fs.existsSync(repo.path)) continue
-    // walk() applies PRUNE, so node_modules / bin / obj / dist never reach the matchers.
-    for (const rel of walk(repo.path)) {
+    // listFiles() honours .gitignore and PRUNE, so node_modules / vendor / .venv / target never
+    // reach the matchers.
+    for (const rel of listFiles(repo.path)) {
       if (!SOURCE_EXTS.has(path.posix.extname(rel))) continue
       const abs = path.join(repo.path, rel)
       let text
@@ -505,11 +794,14 @@ export function discoverEdges (repos) {
           const names = segments ? routeSegments(m[1]) : [m[1]]
           for (const name of names) {
             if (name.length < 3) continue
-            const key = `${kind} ${name}`
-            if (!seen.has(key)) seen.set(key, { kind, name, repos: new Set(), sites: [] })
+            const key = kind + ' ' + name
+            if (!seen.has(key)) {
+              seen.set(key, { kind, name, repos: new Set(), sites: [], siteCount: 0 })
+            }
             const entry = seen.get(key)
             entry.repos.add(repo.name)
-            if (entry.sites.length < 20) {
+            entry.siteCount++
+            if (entry.sites.length < maxSites) {
               entry.sites.push({
                 repo: repo.name,
                 file: rel,
@@ -523,13 +815,296 @@ export function discoverEdges (repos) {
   }
 
   const all = [...seen.values()]
-    .map(e => ({ kind: e.kind, name: e.name, repos: [...e.repos].sort(), sites: e.sites }))
+    .map(e => ({
+      kind: e.kind,
+      name: e.name,
+      repos: [...e.repos].sort(),
+      sites: e.sites,
+      siteCount: e.siteCount
+    }))
     .sort((a, b) => b.repos.length - a.repos.length || a.name.localeCompare(b.name))
 
   return {
     edges: all.filter(e => e.repos.length >= 2),
     internal: all.filter(e => e.repos.length === 1)
   }
+}
+
+// ------------------------------------------------------------------------- cli
+
+const VALUE_FLAGS = {
+  '--root': 'root', '--max-age': 'maxAge', '--sites': 'sites', '--limit': 'limit'
+}
+const NUMERIC_FLAGS = new Set(['maxAge', 'sites', 'limit'])
+const BOOL_FLAGS = { '--full': 'full', '--workspace': 'workspace', '--write': 'write' }
+
+export function parseArgs (argv) {
+  const flags = {
+    root: null, full: false, workspace: false, write: false,
+    maxAge: 14, sites: DEFAULT_MAX_SITES, limit: 0
+  }
+  const rest = []
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]
+    if (a in VALUE_FLAGS) {
+      const v = argv[i + 1]
+      // `--root` with no value used to crash with a raw ERR_INVALID_ARG_TYPE stack trace.
+      if (v === undefined || v.startsWith('--')) return { error: a + ' requires a value' }
+      i++
+      const key = VALUE_FLAGS[a]
+      if (NUMERIC_FLAGS.has(key)) {
+        const n = Number(v)
+        if (!Number.isFinite(n) || n < 0) return { error: a + ' requires a non-negative number' }
+        flags[key] = n
+      } else flags[key] = v
+    } else if (a in BOOL_FLAGS) flags[BOOL_FLAGS[a]] = true
+    else if (a.startsWith('-')) return { error: 'unknown flag ' + a }
+    else rest.push(a)
+  }
+  return { flags, rest }
+}
+
+const USAGE =
+  'usage: map.mjs <scan|update|verify|gitignore|workspace|edges> [--root <dir>] [options]\n' +
+  '  scan [--full]                  inventory one repo (lists capped unless --full)\n' +
+  '  update [--full]                files changed since each map was generated, by owning map\n' +
+  '  verify [--max-age <days>]      drift, case drift, empty maps, guardrail violations\n' +
+  '  gitignore [--write]            report or add the pipeline artifact ignore entries\n' +
+  '  workspace                      repo inventory for a container of 2+ repos\n' +
+  '  edges [--sites n] [--limit n]  cross-repo integration candidates\n' +
+  '  verify --workspace             drift across every repo in the workspace\n'
+
+const DOC_CAP = 12
+const ENTRY_CAP = 15
+const TEST_CAP = 15
+const CI_CAP = 20
+const CHANGE_CAP = 200
+
+function say (obj) { process.stdout.write(JSON.stringify(obj, null, 2) + '\n') }
+
+/** Whether maps already exist, and how many search hints the ledger holds. */
+function mapsState (root) {
+  const mapsDir = path.join(root, '.claude', 'maps')
+  if (!fs.existsSync(mapsDir)) {
+    return { exist: false, note: 'No maps yet - this is a full build.' }
+  }
+  const files = walk(mapsDir).filter(f => f.endsWith('.md'))
+  const indexPath = path.join(mapsDir, 'index.md')
+  let searchHints = 0
+  if (fs.existsSync(indexPath)) {
+    const t = fs.readFileSync(indexPath, 'utf8')
+    const after = t.split(/^##\s+Search hints\s*$/im)[1]
+    if (after) {
+      searchHints = after.split(/^##\s/m)[0].split('\n').filter(l => l.includes('->')).length
+    }
+  }
+  const state = {
+    exist: true,
+    count: files.length,
+    files: files.map(f => '.claude/maps/' + f),
+    searchHints
+  }
+  if (searchHints > 0) {
+    state.readFirst = '.claude/maps/index.md carries ' + searchHints + ' search hints. Read them ' +
+      'before searching the filesystem - the ledger exists to make this run cheaper than the last.'
+  }
+  return state
+}
+
+function scanCmd (root, flags) {
+  const files = listFiles(root)
+  const { tests, ci } = findTestAndCi(files)
+  const stacks = detectStacks(files)
+  const infra = detectInfra(files)
+  const docs = findProjectDocs(files)
+  const entries = findEntryPoints(files, root)
+  const cap = (arr, n) => (flags.full ? arr : arr.slice(0, n))
+  const out = {
+    root,
+    fileCount: files.length,
+    stacks,
+    infra,
+    // Listed before everything else: read these before inferring anything.
+    projectDocs: cap(docs, DOC_CAP),
+    projectDocsTotal: docs.length,
+    tree: buildTree(files),
+    entryPoints: cap(entries, ENTRY_CAP),
+    entryPointsTotal: entries.length,
+    tests: cap(tests, TEST_CAP),
+    testsTotal: tests.length,
+    ci: cap(ci, CI_CAP),
+    ciTotal: ci.length,
+    gitignore: gitignoreStatus(root),
+    maps: mapsState(root)
+  }
+  if (stacks.length === 0 && infra.length === 0) out.stackHint = UNKNOWN_STACK_HINT
+  const truncated = docs.length > out.projectDocs.length ||
+    entries.length > out.entryPoints.length ||
+    tests.length > out.tests.length ||
+    ci.length > out.ci.length ||
+    out.tree.omitted > 0
+  if (truncated) {
+    out.truncated =
+      'Lists are capped so this payload stays small. Re-run with --full for complete lists.'
+  }
+  say(out)
+  return 0
+}
+
+function updateCmd (root, flags) {
+  const owners = mapOwnership(root)
+  const head = git(root, ['rev-parse', 'HEAD'], 65536)
+  const perMap = owners.map(o => changedFiles(root, o.sha))
+  const union = [...new Set([...changedFiles(root), ...perMap.flat()])].sort()
+  const { byMap, unowned } = assignChanges(owners, union)
+  const cap = arr => (flags.full ? arr : arr.slice(0, CHANGE_CAP))
+  const now = Date.now()
+  const out = {
+    root,
+    headSha: head ? head.trim().slice(0, 12) : null,
+    changed: cap(union),
+    changedTotal: union.length,
+    maps: owners.map(o => {
+      const mine = byMap.get(o.map) ?? []
+      return {
+        map: o.map,
+        baseline: o.sha,
+        generated: o.generated,
+        ageDays: o.generated ? ageInDays(o.generated, now) : null,
+        changed: cap(mine),
+        changedTotal: mine.length,
+        regenerate: mine.length > 0
+      }
+    }),
+    unowned: cap(unowned),
+    unownedTotal: unowned.length
+  }
+  if (owners.length === 0) {
+    out.hint = 'No maps exist yet - run a full build rather than an update.'
+  } else if (owners.every(o => !o.sha)) {
+    out.hint = 'No map records a commit in its Generated: header, so the baseline is HEAD and ' +
+      'committed work is invisible. Write "Generated: <ISO date> (<short sha>)" on every map.'
+  } else if (unowned.length) {
+    out.hint = unowned.length + ' changed file(s) belong to no map - a new domain, or a domain ' +
+      'whose map cites nothing near them. Decide whether they need a new map.'
+  }
+  say(out)
+  return 0
+}
+
+function workspaceCmd (ws) {
+  say({
+    root: ws.root,
+    name: ws.name,
+    configured: Boolean(ws.config),
+    repos: ws.repos.map(r => {
+      const files = listFiles(r.path)
+      const { tests, ci } = findTestAndCi(files)
+      return {
+        name: r.name,
+        role: r.role,
+        fileCount: files.length,
+        stacks: detectStacks(files),
+        infra: detectInfra(files),
+        projectDocs: findProjectDocs(files).slice(0, 5),
+        entryPoints: findEntryPoints(files, r.path).slice(0, 5),
+        hasTests: tests.length > 0,
+        hasCi: ci.length > 0
+      }
+    })
+  })
+  return 0
+}
+
+function edgesCmd (ws, flags) {
+  const { edges, internal } = discoverEdges(ws.repos, { maxSites: flags.sites })
+  const shown = flags.limit ? edges.slice(0, flags.limit) : edges
+  const out = {
+    root: ws.root,
+    name: ws.name,
+    edgeCount: edges.length,
+    edges: shown,
+    internalCount: internal.length
+  }
+  if (shown.length < edges.length) out.omitted = edges.length - shown.length
+  out.hint = 'Candidates only: the script asserts that the same string appears in two repos and ' +
+    'nothing more. Confirm each before writing it into a map, and group them by controller or ' +
+    'domain rather than listing every row.'
+  say(out)
+  return 0
+}
+
+function cli (argv) {
+  const parsed = parseArgs(argv)
+  if (parsed.error) {
+    process.stderr.write('map.mjs: ' + parsed.error + '\n\n' + USAGE)
+    return 2
+  }
+  const { flags, rest } = parsed
+  const cmd = rest[0]
+  const start = flags.root ?? process.cwd()
+
+  if (flags.root !== null && !fs.existsSync(flags.root)) {
+    process.stderr.write('map.mjs: --root does not exist: ' + flags.root + '\n')
+    return 2
+  }
+
+  // ---- workspace-scoped commands, which operate on a container rather than one repo ----
+
+  if (cmd === 'workspace' || cmd === 'edges' || (cmd === 'verify' && flags.workspace)) {
+    const ws = findWorkspace(start)
+    if (!ws) {
+      say({
+        error: 'not a workspace',
+        start: path.resolve(start),
+        hint: 'A workspace is a directory holding 2+ git repos. A single repo, or a folder of ' +
+              'unrelated products, is not one. Add .claude-workspace.json to declare it explicitly.'
+      })
+      return 4
+    }
+
+    if (cmd === 'workspace') return workspaceCmd(ws)
+    if (cmd === 'edges') return edgesCmd(ws, flags)
+
+    // verify --workspace: every repo, plus the container's own workspace map.
+    const opts = { maxAgeDays: flags.maxAge }
+    const results = ws.repos.map(r => ({ repo: r.name, ...verifyMaps(r.path, opts) }))
+    const wsLevel = verifyMaps(ws.root, opts)
+    const ok = results.every(r => r.ok) && wsLevel.ok
+    say({ root: ws.root, ok, workspaceMap: wsLevel, repos: results })
+    return ok ? 0 : 1
+  }
+
+  // ---- repo-scoped commands ----
+
+  if (!['scan', 'update', 'verify', 'gitignore'].includes(cmd)) {
+    process.stderr.write(USAGE)
+    return 2
+  }
+
+  // Refuse outside a repo rather than falling back to the start directory. A container of
+  // unrelated repos (e.g. ~/Projects) would otherwise scan tens of thousands of files and
+  // report several stacks as if they were one system.
+  const root = findRepoRoot(start)
+  if (root === null) {
+    say({
+      error: 'not a git repository',
+      start: path.resolve(start),
+      hint: 'Run from inside a repo. A folder holding several repos is not itself a repo.'
+    })
+    return 3
+  }
+
+  if (cmd === 'scan') return scanCmd(root, flags)
+  if (cmd === 'update') return updateCmd(root, flags)
+  if (cmd === 'verify') {
+    const r = verifyMaps(root, { maxAgeDays: flags.maxAge })
+    say({ root, ...r })
+    return r.ok ? 0 : 1
+  }
+  const r = flags.write ? ensureGitignore(root) : gitignoreStatus(root)
+  say({ root, ...r })
+  return 0
 }
 
 // Run the CLI only when executed directly, not when imported by the test suite.

@@ -5,7 +5,7 @@ description: >
   with File Impact Manifests, scored effort, milestones and hard pauses. Reads the architecture
   maps; writes only the plan file, never source. Triggered by /plan-feature.
 disable-model-invocation: true
-allowed-tools: Bash, Read, Write, Glob, Grep, AskUserQuestion
+allowed-tools: Bash, Read, Write, Glob, Grep, AskUserQuestion, EnterPlanMode, ExitPlanMode
 ---
 
 # plan-feature
@@ -19,11 +19,18 @@ If asked mid-run to "just make the change while you're in there", refuse and poi
 planner that edits code produces neither a plan nor a reviewed change.
 
 Artifact paths, repo resolution, `<Name>` derivation and cost discipline come from
-`~/.claude/skills/_shared/pipeline-contract.md`.
+`~/.claude/skills/_shared/pipeline-contract.md`. The complexity rubric used below comes from
+`~/.claude/skills/_shared/complexity-scoring.md`.
 
 ## 1 — Ingestion
 
 Accept **either** an ADO work item or a written description.
+
+**Default to asking.** Everywhere below that says "ask" is a floor, not a ceiling — if anything
+about scope, intent, acceptance criteria, constraints, or tradeoffs between approaches is genuinely
+open, ask about it rather than picking a reasonable-looking default. A plan built on a silent
+assumption is wrong in a way that's expensive to discover later; a clarifying question costs a
+few seconds. When in doubt, ask one more question than feels strictly necessary.
 
 ### From Azure DevOps (`--ado <id>`)
 
@@ -59,9 +66,39 @@ poisons every downstream stage.**
 ### From a description (`--description "..."`)
 
 Use the text as given. If it is a single vague sentence, ask the clarifying questions that
-change the design before planning against a guess.
+change the design before planning against a guess — and don't stop at the first one that resolves
+the biggest ambiguity if smaller ones remain.
+
+### Complexity score & model gate
+
+Once the request is unambiguous — the empty-ticket rule and the vague-description rule above are
+satisfied, not worked around — score it using the feature-level rubric in
+`~/.claude/skills/_shared/complexity-scoring.md`. Show the breakdown before moving to map
+contextualisation.
+
+The score fixes which model this design must run under. `plan-feature` never dispatches
+subagents at any score — this gate is purely about the interactive session's own model:
+
+| Score | Required model |
+|---|---|
+| 1-7 | Sonnet 5, no subagents |
+| 8-10 | Opus 5, no subagents |
+
+Check the required tier against the model actually powering this session (stated in your own
+system prompt). If the session already meets or exceeds it, continue. If not, tell the user the
+score and that this design needs to run on the required model — ask them to switch (`/model`)
+before you continue, and wait; don't proceed on a lower tier "just this once." If they explicitly
+choose to proceed anyway, note in the plan's header that it was designed below the required tier,
+so `/execute-plan` and any later reviewer can see it.
 
 ## 2 — Map contextualisation
+
+**Call `EnterPlanMode` before anything else in this step.** `plan-feature` always designs under
+plan mode — the exploration below and the three-tier design in step 3 are exactly the
+"explore, then design an approach for approval" work plan mode exists for, and `/execute-plan`'s
+own gate already assumes it was used (it refuses to run while plan mode is still active,
+un-approved). If the user declines to enter plan mode, stop and explain that this pipeline stage
+depends on it rather than continuing without it.
 
 Read `.claude/maps/index.md` and the domain maps relevant to the feature. Extract the specific
 flows the feature touches so you understand how the system behaves today, start to finish.
@@ -87,8 +124,10 @@ product — and this feature may span more than one of them.
    downstream.
 3. **A change that crosses a shared contract is a multi-repo change.** Generated clients, shared
    DTOs, queue message shapes and API route names all fall in this class — a contract edit on one
-   side is incomplete until the other side is updated. The workspace map names the regeneration
-   or update command; put it in the plan as a task, not a footnote.
+   side is incomplete until the other side is updated. The workspace map records the regeneration
+   or update command under `## Build & test commands` — the one section the read-only guardrail
+   carves out for commands. Put it in the plan as a task, not a footnote. If that section is
+   absent, ask the user for the command rather than inventing one.
 
 If it exits 4, the target is a single repo. Everything below behaves exactly as before.
 
@@ -122,6 +161,9 @@ path glued onto the front.
 Tier 3 gets an affected-area summary instead, naming the repos involved.
 
 ### Scoring
+
+This is separate from the feature-level complexity score computed at ingestion — that one sized
+the *design* work; this one sizes *implementation* per tier, now that tiers exist.
 
 Score every tier on all of these:
 
@@ -167,7 +209,7 @@ Close the plan with:
 - **Consolidated risks** for the selected tier.
 - **Fallback approaches**, drawn from the tiers not chosen, to fall back to if the primary
   approach hits a blocker mid-execution.
-- **Validation gate** to run before the work is considered done: worktree pseudo-build → runtime
+- **Validation gate** to run before the work is considered done: branch pseudo-build → runtime
   tests → `/code-review` → `/test-feature`. Proceed to merge only if all are clean.
 
 ## 6 — Output
@@ -177,11 +219,25 @@ Close the plan with:
 list in a `**Repos:**` line directly under the title so `/execute-plan` can read it without
 parsing the manifest.
 
+State the ingestion complexity score in a `**Complexity:**` line directly under the title, e.g.
+`**Complexity:** 8/10 (High) — designed under Sonnet 5 (user chose to proceed below the required Opus tier)`.
+
 Include the ADO work item ID and title when there is one.
 
 Present the three tiers in a compact comparison, recommend the best-value tier first, then use
-`AskUserQuestion` to let the user choose. Record the choice in the plan — `/execute-plan` reads
-it to know which tier's milestones to execute.
+`AskUserQuestion` to let the user choose. This happens **inside plan mode**, alongside the usual
+exploration and design work — it's the "clarify approaches" use of `AskUserQuestion` plan mode
+expects, not a substitute for the approval step below. Record the choice in the plan —
+`/execute-plan` reads it to know which tier's milestones to execute.
+
+### Approval and write
+
+Once a tier is chosen, write out its full content — manifest, milestones, contingency, the
+required headings below — and call `ExitPlanMode` to request the user's approval, per plan mode's
+own rules. If they approve, write the canonical artifact to the path above. If they come back with
+changes, revise within plan mode and call `ExitPlanMode` again — don't write the artifact until an
+`ExitPlanMode` round is actually approved. This is what leaves plan mode inactive by the time
+`/execute-plan` runs, satisfying its gate.
 
 Required headings, because `/execute-plan` parses them:
 
@@ -200,6 +256,13 @@ Required headings, because `/execute-plan` parses them:
 
 - Editing source "while you're in there". This skill plans; `/execute-plan` builds.
 - Proceeding on a ticket title when the ticket has no written spec.
+- Scoring the ingestion complexity before resolving ambiguity, instead of after.
+- Proceeding on a lower-tier model at High complexity because the current model "seems fine" —
+  ask the user to switch, don't decide it's unnecessary yourself.
+- Skipping `EnterPlanMode`, or designing outside it, because the request "seems simple enough".
+- Writing the `FEATURE_PLAN_<Name>.md` artifact before an `ExitPlanMode` round was approved.
+- Settling for the first plausible reading of an ambiguous request instead of asking — see the
+  ingestion principle above.
 - Scanning source because the maps were missing, instead of offering `/map-codebase`.
 - Quoting the user's wall-clock time instead of Claude Code's execution effort.
 - A File Impact Manifest that says "and related files" — it must be exhaustive.

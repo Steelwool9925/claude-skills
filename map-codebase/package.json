@@ -1,0 +1,8 @@
+{
+  "name": "map-codebase-skill",
+  "private": true,
+  "type": "module",
+  "description": "Deterministic repository scanning for the map-codebase skill.",
+  "engines": { "node": ">=14.8" },
+  "scripts": { "test": "node run-tests.mjs" }
+}

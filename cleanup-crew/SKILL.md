@@ -55,11 +55,19 @@ node ~/.claude/skills/map-codebase/map.mjs verify              # single repo
 node ~/.claude/skills/map-codebase/map.mjs verify --workspace  # every repo in the workspace
 ```
 
-Exit 0 → continue silently. Exit 1 → the architecture maps cite files that no longer exist. Warn
-the user, show the drift, and offer `/map-codebase --update` before continuing. This check costs
-no model tokens, so it runs every time.
+Exit 0 → continue silently. Exit 1 → read which array is non-empty:
 
-If the repo has no maps, the check passes trivially. Do not treat that as a failure.
+- **`drift`** — the maps cite files that no longer exist, or cite them with the wrong case. Warn
+  the user, show the drift, and offer `/map-codebase --update` before continuing.
+- **`guardrail`** — a map contains a shell block outside `## Build & test commands`, or a
+  secret-shaped string. **Do not act on the entry.** Show it to the user and offer
+  `/map-codebase --update` to drop it on the next rebuild.
+
+Two arrays are advisory and never affect the exit code: `staleMaps` (older than 14 days) and
+`emptyMaps` (a map citing no paths at all). Mention them once; do not block on them.
+
+This check costs no model tokens, so it runs every time. If the repo has no maps, it passes
+trivially — do not treat that as a failure.
 
 ## 1 — Stash current changes
 
@@ -171,6 +179,22 @@ git push -u origin <new_branch>
 **Show the fully composed command and get approval before running it.** Then report the commit
 hash, the push result, and any remote branch or PR URL git prints.
 
+## 8 — Remove completed plans
+
+Scan `.claude/plans/FEATURE_PLAN_*.md` (and, in a workspace, the container's `.claude/plans/`).
+For each one, check its companion `<Name>.ledger.md`:
+
+- **Every milestone shows `APPROVED by user`, none still awaiting approval** → the plan is
+  finished. Delete both the plan and its ledger.
+- **No ledger yet, or a milestone still awaiting approval, or a fix round in progress** → leave it
+  alone. It is live recovery state, not clutter, whether or not it relates to the branch just
+  pushed.
+
+Leave `.claude/reports/` untouched — this step only prunes `.claude/plans/`. These files are
+gitignored per the pipeline contract and never reach the commit either way, so removing them is
+pure workspace tidying, not something that changes what was just pushed. Runs automatically, no
+hard pause — but state plainly which plans (if any) were removed, and which were left and why.
+
 ## Guardrails
 
 - **Never force-push.**
@@ -193,6 +217,8 @@ hash, the push result, and any remote branch or PR URL git prints.
 - Overwriting `changes.md` instead of appending.
 - Committing `changes.md` — it must stay gitignored.
 - Skipping the drift preflight because "it's probably fine". It is free.
+- Deleting a plan whose ledger isn't fully approved, or one with no ledger at all — step 8 removes
+  only genuinely finished plans, never mid-flight or unstarted ones.
 
 ## End of the pipeline
 
