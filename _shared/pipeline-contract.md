@@ -241,6 +241,18 @@ specific use, and only if the harness's own permission mode or tool-allowlist ac
 `Agent`/`Workflow` call through — never a standing "work autonomously" instruction treated as
 pre-authorization, and never a pathway a skill builds toward or falls back to on its own.
 
+**The `/haiku-split` dynamic-mode exception (narrow, user-approved).** `/haiku-split execute-plan`,
+`/haiku-split plan-feature` and `/haiku-split kevin` may launch Haiku segments
+(`claude-haiku-4-5-20251001`), and only for the delegation points those skills' own
+`## Haiku delegation (via /haiku-split)` sections name: micro-task code implementation for
+`execute-plan`; ADO fetch, map dossier and roadmap upsert for `plan-feature`; browser driving of
+briefed flows for `kevin`. Every launch (each milestone batch, each correction round, each
+plan-feature batch, each kevin batch) needs the user's own confirmation, and a resume is a new run.
+The main session still does all design, scoring, grading, verification, ledger and git work, and a
+failed piece is fixed by the main session, never escalated. Plain `/execute-plan`, `/plan-feature`
+and `/kevin`, `test-feature`, `map-codebase` and `code-review` stay no-subagent; `test-feature` and
+`kevin` run in the main session during the `--roadmap` loop.
+
 ---
 
 ## Read-only guardrail
