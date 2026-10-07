@@ -20,7 +20,7 @@ context-barrier rules encoded in `workflow.js.tmpl` and the hard-rules block. Th
 edits the target skill. In **static mode** (§1-§9) it also never reads project source code.
 
 **Two modes.** A target whose `SKILL.md` contains a `## Haiku delegation (via /haiku-split)`
-section runs in **dynamic mode** (§10). Today that is `execute-plan`, `plan-feature` and `kevin`. Dynamic
+section runs in **dynamic mode** (§10). Today that is `execute-plan`, `plan-feature`, `kevin` and `map-codebase`. Dynamic
 mode is the only mode in which the main session works the target's own steps and reads project
 source; Haiku receives only the delegation points that section names. Every other target runs in
 static mode, unchanged. A target without that section never runs in dynamic mode.
