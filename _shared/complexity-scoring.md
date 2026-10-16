@@ -4,9 +4,11 @@ This file is read by `plan-feature` and `execute-plan` — the only place the co
 defined, so both skills score the same way and a score means the same thing wherever it's shown.
 It complements `pipeline-contract.md`, not replaces it.
 
-**No pipeline skill ever spawns a subagent.** Every score below feeds a recommendation on which
-model the interactive session itself should be running as, or how much verification rigor a task
-deserves — never a dispatch tier, since nothing is ever dispatched.
+**No pipeline skill ever spawns a subagent** (the one narrow exception, `/haiku-split` dynamic
+mode, is in `pipeline-contract.md`). Every score below feeds a recommendation on which model the
+interactive session itself should be running as, or how much verification rigor a task deserves —
+never a dispatch tier. Under `/haiku-split execute-plan` a higher task score means a finer split
+into Haiku micro-tasks and a slower main-session verification; it never routes a task to a model.
 
 The rubric is used at two different grains:
 
@@ -178,7 +180,9 @@ this once" the paragraph above forbids. See kevin's §0b and §6.1 for the mecha
 running this.
 
 Neither skill dispatches subagents at any tier — this gate is purely about the interactive
-session's own model, identical in spirit to the feature-level gate above.
+session's own model, identical in spirit to the feature-level gate above. (`/haiku-split`
+delegation of mechanical pieces does not change this gate; the main session still owns every
+scored decision.)
 
 ## Map-level use (map-codebase)
 

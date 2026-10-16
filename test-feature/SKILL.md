@@ -210,6 +210,22 @@ Coverage is not quality. Flag:
 - High-coverage, low-value tests. Recommend **mutation testing** where the stronger signal would
   be worth the cost.
 
+**Test economy.** The target is the fewest tests that cover the most lines and branches of the
+changed code. A small suite with full coverage is not a gap; a large suite with the same coverage
+is a finding. Flag each of these as a **Warning**, never a Critical Failure, with a merge
+suggestion as a Correction Plan item (repo, file, which tests to merge or parameterize):
+
+- **Overlapping tests** — several tests driving the same unit through the same branches, where one
+  test or one parameterized table would do. At level 3 and above, show it: the coverage of the
+  suite with a suspect test removed, from the real tool, equals the coverage with it present.
+- **Unparameterized duplicates** — copy-pasted tests differing only in input and expected output.
+- **Mock-echo and assertion-free tests** — already flagged above; also count them as redundant.
+- **Tests of trivial code** — getters, DTOs, DI wiring, generated code, framework behaviour.
+
+Never recommend adding tests to raise a coverage number alone. Recommend one only for an uncovered
+branch that is reachable, or a plan acceptance criterion nothing exercises. Plan-mandated tests are
+never flagged for removal, only for merging.
+
 ## 5 — Mandatory evaluation vectors
 
 Every level evaluates all five. Intensity scales with optimism; **none may be skipped.**
@@ -323,6 +339,8 @@ For a cross-repo feature the report goes to `<container>/.claude/reports/TEST_RE
 - Editing source. This skill writes one file: the report.
 - Spawning a subagent for any part of the grading, including the §7 correctness pass.
 - Quoting a coverage number without the command output that produced it.
+- Asking for more tests to lift coverage, or flagging redundant tests as Critical. Redundancy is a
+  Warning with a merge suggestion.
 - Reporting "tests pass" when the build actually failed.
 - Skipping a mandatory vector because the optimism level is low. Scale intensity, never skip.
 - Grading a High-complexity plan at optimism 4-5 under a model below the required tier instead of

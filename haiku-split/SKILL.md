@@ -16,11 +16,20 @@ allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, Workflow
 **This skill is the one place where subagents are launched, and only after the user confirms that
 specific run (§6).** The confirmation covers that one run, never a later run or another skill; a
 resume after a pause (§8) is a new run and is confirmed again. Every Haiku segment follows the
-context-barrier rules encoded in `workflow.js.tmpl` and the hard-rules block. The skill itself
-never reads project source code and never edits the target skill.
+context-barrier rules encoded in `workflow.js.tmpl` and the hard-rules block. The skill never
+edits the target skill. In **static mode** (§1-§9) it also never reads project source code.
+
+**Two modes.** A target whose `SKILL.md` contains a `## Haiku delegation (via /haiku-split)`
+section runs in **dynamic mode** (§10). Today that is `execute-plan`, `plan-feature`, `kevin` and `map-codebase`. Dynamic
+mode is the only mode in which the main session works the target's own steps and reads project
+source; Haiku receives only the delegation points that section names. Every other target runs in
+static mode, unchanged. A target without that section never runs in dynamic mode.
 
 Usage:
   `/haiku-split <skill-name | path> [--limit <tokens>] [--task-size <tokens>] [--max-segments <n>] [--args "<args for the target skill>"]`
+
+`--args` is passed to the target verbatim, so a target flag keeps its dashes:
+`/haiku-split execute-plan --args "--roadmap"`, `/haiku-split plan-feature --args "--ado 1234"`.
 
 Defaults: `--limit 100000`, `--task-size 20000`, `--max-segments 10`.
 Haiku model ID is exactly `claude-haiku-4-5-20251001`. It is set explicitly on every `agent()` call:
@@ -32,7 +41,9 @@ an omitted model inherits the controller's model and breaks the Haiku bound.
    path separator or ends in `SKILL.md`, use it as that path.
 2. If nothing resolves: Glob `~/.claude/skills/*/SKILL.md`, list the names, and stop.
 3. If the target is `haiku-split` itself, refuse and stop.
-4. Read the target `SKILL.md` and every `_shared` or reference file it names. Read no project source.
+4. Read the target `SKILL.md` and every `_shared` or reference file it names. If it has a
+   `## Haiku delegation (via /haiku-split)` section, go to §10 now; §2-§9 do not apply. Otherwise
+   read no project source.
 5. Name the single scope **AREA**: `<skill-name>` plus the `--args` value, e.g. `plan-feature:ADO-123`.
 6. Run folder: `<cwd>/.claude/haiku-split/<skill-name>/<YYYYMMDD-HHMM>/`. Create it.
 
@@ -126,10 +137,48 @@ When the workflow returns `done`: read `notes.md`, `progress.log` and the produc
 FAILED line and each Outputs path from `TASKS.md` exists. Report using the global response format.
 Anything you cannot verify, say so.
 
+## 10 — Dynamic mode (targets with a `## Haiku delegation (via /haiku-split)` section)
+
+The main session is the controller: it works the target skill's own steps, in the target's own
+order, following the target's text — every gate, question, score, verification and hard pause
+stays exactly as the target writes it. Only the delegation points the target's
+`## Haiku delegation` section names go to Haiku. The target's "no subagent" wording is lifted
+only for those points, only for a launch the user confirms in step 4.
+
+Haiku never sees the target skill, never invokes a skill, never verifies its own work and never
+runs state-changing git. A piece that cannot be written as a mechanical brief with a mechanical
+done-check stays with the main session.
+
+At each delegation point:
+
+1. **Brief.** Write each Haiku piece as a task block from `templates/TASKS.md` (code-task fields
+   included). The brief inlines everything Haiku needs: exact file paths, exact signatures or
+   interfaces, the exact acceptance check. Size it to `--task-size`. Add `Depends on` for every
+   earlier brief whose output it reads.
+2. **Run folder.** Per §1 step 6, one folder per batch (a milestone, a correction round or a
+   plan-feature batch). Write `TASKS.md` (hard rules from `templates/hard-rules.md`, deleting
+   lines that cannot apply), `handoff-0.md`, `notes.md`, `progress.log`, and render `workflow.js`
+   exactly as in §4, then run the same parse check.
+3. **Show.** Short table: briefs, estimated segments, LIMIT, MAX_SEGMENTS, run folder, and what
+   the main session does after the batch. Do not paste the files.
+4. **Confirm (hard pause).** §6, every batch. The yes covers this batch only; the next milestone,
+   correction round or batch is a new run with a new confirmation.
+5. **Launch.** §7. Wait for the completion notification, then read `progress.log` and `notes.md`.
+6. **Verify.** Per the target's own verification section, on every Haiku output, before anything
+   downstream depends on it. A Haiku `DONE` line is a claim, never evidence. A failed, ambiguous
+   or rejected piece is fixed by the main session itself: no relaunch to a larger model, no
+   second Haiku pass on the same piece, no subagent.
+7. **Resume.** `blocked` handling follows §8. A new batch gets its own folder.
+
+Haiku segment spend (`startCounter - endCounter`) counts against whatever token ceiling the
+target defines. The main session adds it to the target's ledger or budget the way the target says.
+
 ## Rules
 
-- Never launch without the §6 confirmation.
+- Never launch without the §6 confirmation, in either mode.
 - Never run a segment on a model other than `claude-haiku-4-5-20251001`.
 - No automatic escalation to a larger model. A failed or ambiguous task goes to the main session.
 - Segments run sequentially, never in parallel.
 - Never modify the target skill or any file under `~/.claude/skills` other than this skill's own.
+- Dynamic mode applies only to a target that carries its own `## Haiku delegation` section. Never
+  invent delegation points a target does not name.

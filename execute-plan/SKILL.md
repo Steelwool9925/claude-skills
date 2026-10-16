@@ -5,8 +5,9 @@ description: >
   implement and verify every one yourself in the current session under a hard token ceiling,
   re-evaluate regressions, and hard-pause at each milestone for user testing. With --roadmap,
   works through every Active item in .claude/roadmap.md instead, looping build / test-feature /
-  kevin / corrections per item until both come back clean. Never spawns a subagent. Triggered by
-  /execute-plan.
+  kevin / corrections per item until both come back clean. Never spawns a subagent, except Haiku
+  implementation of micro-tasks when launched via /haiku-split and confirmed per batch. Triggered
+  by /execute-plan.
 disable-model-invocation: false
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, Skill, AskUserQuestion
 ---
@@ -14,8 +15,11 @@ allowed-tools: Bash, Read, Write, Edit, Glob, Grep, Skill, AskUserQuestion
 # execute-plan
 
 **Never spawn a subagent — not via `Agent`, not via `Workflow`, not via any other dispatch
-surface.** You are the sole implementer and the sole verifier: every task's code, every
-verification pass, every ledger line is written by you, in this session, yourself. The plan is
+surface — except Haiku segments launched through `/haiku-split` under the `## Haiku delegation
+(via /haiku-split)` section below, after the user's per-launch confirmation.** Plain
+`/execute-plan` never delegates. You are always the sole verifier: every verification pass and
+every ledger line is written by you, in this session, yourself; unless that section is in force,
+you are also the sole implementer. The plan is
 the source of truth. Artifact paths and cost discipline come from
 `~/.claude/skills/_shared/pipeline-contract.md`. The complexity rubric used in §2 comes from
 `~/.claude/skills/_shared/complexity-scoring.md`, repurposed here as a verification-rigor and
@@ -23,8 +27,8 @@ session-model signal, never as a dispatch tier — there is no tier to dispatch 
 
 ## 0 — Gate
 
-- **`--roadmap` passed?** Skip everything below — go to §11 instead. Roadmap mode processes
-  several plans; the rest of this gate through §10 governs a single plan.
+- **`--roadmap` passed?** Skip everything below — go to §8 instead. Roadmap mode processes
+  several plans; the rest of this gate through §7 governs a single plan.
 - **If plan mode is active, STOP:** "execute-plan implements an approved plan — approve it
   first." This skill executes; it does not write plans.
 - **Locate the plan:** an explicit argument, else the newest `.claude/plans/FEATURE_PLAN_*.md`
@@ -78,6 +82,11 @@ constraints. If the plan carries a `## Design Direction` and the task touches a 
 it verbatim in the brief's global constraints — this is what keeps every UI task visually
 consistent without re-deriving style choices per task.
 
+Every brief that adds or changes logic also carries a **test obligation**: the existing test file
+to extend (or "none found"), the branches the change introduces, and the plan test cases it
+satisfies. Tasks that touch only trivial code (§3b) state "no test". Do not decompose "write
+tests" as its own task — tests belong to the task whose branches they cover, so §3b can merge them.
+
 Score each task against its own brief using the task-level rubric in
 `~/.claude/skills/_shared/complexity-scoring.md`. There is no tier to dispatch to — you implement
 every task yourself, regardless of score. Look up what the score means deterministically:
@@ -123,6 +132,54 @@ looking for the ways the diff could satisfy the brief's letter while missing its
 confirming it compiles.
 
 If errors are found, fix them yourself and re-verify before moving on.
+
+## 3b — Test economy
+
+The goal is the fewest tests that cover the most lines and branches of the code the milestone
+changed. A test earns its place by covering a line or branch nothing else covers, or by pinning a
+plan acceptance criterion. Apply this to every test you write or touch, in every task.
+
+**Before writing a test, in this order:**
+
+1. **Find an existing test to extend.** Grep the test project for the unit under test. If one
+   exists, add a case, row, or assertion to it rather than a new test.
+2. **Parameterize.** Cases that differ only by input and expected output go in one data-driven test
+   (`[Theory]`/`[TestCase]`, `it.each`, `@pytest.mark.parametrize`, table tests), one row per
+   branch.
+3. **Write a new test only when 1 and 2 cannot hold the case**, and then write the one test whose
+   inputs drive the most uncovered branches through the unit.
+
+**What a test must be:**
+
+- **Behavioural.** It asserts observable output, state change, or a thrown error for a given
+  input. A test that only checks a mock was called, restates the implementation, or has no
+  assertion is rejected.
+- **Non-trivial target.** No tests for getters/setters, DTOs and records, DI wiring, generated
+  code, or framework behaviour.
+- **Plan-mandated tests stay.** Run every plan test case. You may merge one into another test or a
+  parameterized row, but never drop one that covers a unique branch or acceptance criterion.
+
+**Prove it with coverage, line and branch.** Run the project's own coverage tool scoped to the
+files the task changed, before and after adding tests.
+
+- A new test must raise line or branch coverage on a changed file. If it doesn't, merge it into a
+  test that does, or delete it.
+- If no coverage tool is configured, tell the user, write `cov=n/a` on the `TESTS` line, and map
+  each branch of the changed code to its test by hand instead. Do not install a tool unasked.
+- Uncovered branches that are unreachable (defensive guards, impossible states) are listed in the
+  report, not given contrived tests.
+
+**Milestone sweep.** Before the §6 hard stop, review every test file the milestone added or
+touched. Merge tests that exercise the same unit through overlapping branches, collapse
+copy-pasted cases into parameterized rows, delete any test whose removal leaves line and branch
+coverage unchanged and no plan test case or acceptance criterion uncovered. Re-run the suite and
+coverage after the sweep to confirm nothing dropped. Then append:
+
+```
+TESTS | milestone=<N> | added=<a> | merged=<m> | dropped=<d> | cov=<line%>/<branch%>
+```
+
+`cov=` is measured on the milestone's changed files, not the whole repo.
 
 ## 4 — Regression re-evaluation
 
@@ -227,7 +284,8 @@ over it.
 
 If the target is not a git repo at all, say so and build in place — there is nothing to branch.
 
-Execute tasks sequentially until the milestone is complete, then **hard stop** and print exactly:
+Execute tasks sequentially until the milestone is complete, run the §3b milestone sweep, then
+**hard stop** and print exactly:
 
 > Milestone [X] complete. Please run your tests and verify the functionality. Type 'Approve' to
 > begin the next milestone, or provide feedback for corrections.
@@ -302,13 +360,58 @@ For each selected row, in order:
 `.claude/plans/<Name>.ledger.md` for the highest `CORRECTIONS round=` line to know which round to
 resume from rather than restarting the loop at round 1.
 
+## Haiku delegation (via /haiku-split)
+
+Applies **only** when launched as `/haiku-split execute-plan [--args "..."]`. Plain `/execute-plan`
+ignores this section. `--args` is verbatim, so write `--args "--roadmap"`. `/haiku-split` runs
+this skill in its dynamic mode: you work every step below yourself, in order, and only the
+implementation of micro-tasks goes to Haiku (`claude-haiku-4-5-20251001`).
+
+**What stays with you, unchanged:** §0 gate, §1 budget guard, §2 decompose and score (including
+the Opus ask for scores 8-10), §3 verification, §4 regression, §5 ledger, §6 branches and the
+milestone hard stop, §7 finish, and §8 including `test-feature` and `kevin` (a segment cannot
+invoke skills). Branch creation and every state-changing git command are yours; Haiku never runs
+them.
+
+**What Haiku does:** writes the code for one micro-task, nothing else. Tests stay with you: §3b
+needs the whole milestone's test files in view to extend, parameterize and sweep, which a
+single-file micro-task cannot see. Haiku briefs say "write no tests"; you write them after
+verifying the diff.
+
+1. **Split every task finer.** After §2 scores a task, cut it into micro-tasks Haiku can do
+   mechanically: one file or function, exact signatures and interfaces, an exact acceptance
+   check, within the `--task-size` token estimate. The higher the score, the finer the split. The
+   parent task keeps its score. A piece you cannot make mechanical stays with you and is
+   implemented in this session.
+2. **One batch per milestone.** Write the briefs as a run folder (see `/haiku-split` §10), then
+   the user confirms the launch (`/haiku-split` §6). Each milestone, and each correction round in
+   §8, is a new batch with a new confirmation. Never launch unconfirmed, never launch the next
+   milestone before the §6 hard stop is approved.
+3. **Verify every diff yourself (§3)** before the next brief that depends on it, or before
+   anything depends on it. A parent scored 8-10, or any large diff, gets the line-by-line pass.
+   A Haiku `DONE` line is a claim, not evidence.
+4. **A failed or rejected micro-task is fixed by you.** No second Haiku pass, no escalation to a
+   larger model, no subagent.
+5. **Ledger.** Micro-tasks log as `task=<N>.<m>`, the parent keeps `score=`, and a line may end
+   with `| by=haiku` or `| by=main`. Plan pruning reads only `APPROVED | milestone=<N> |` lines,
+   so the extra field is safe. Haiku segment spend (`startCounter - endCounter` per segment)
+   counts against the 350k ceiling in §1; add it to the `tokens=` totals alongside your own.
+
 ## Red flags — STOP
 
 | About to… | Reality |
 |---|---|
-| Spawn a subagent for any part of this — a task, a verifier, a ledger update | Forbidden, unconditionally. You are the sole implementer and verifier for every task. |
+| Spawn a subagent for any part of this — a task, a verifier, a ledger update | Forbidden, unconditionally, except Haiku micro-task implementation launched through `/haiku-split` after the user's confirmation. Verification and the ledger are never delegated. |
+| Launch a Haiku batch for the next milestone, or a correction round, on the previous confirmation | Every batch is a new run with its own confirmation. |
+| Mark a Haiku micro-task done because its progress line says `DONE` | Read its diff yourself (§3). The line is a claim. |
 | Skip the fresh, skeptical re-read in §3 because you just wrote the diff | That's exactly the diff most likely to get a rubber-stamp. Re-derive intent from the brief before checking the code. |
 | Treat a task scored 8-10 as routine because you implemented it yourself | Tell the user the score; ask whether the session should be running Opus tier before continuing. |
+| Add a new test file or test method without checking for an existing one to extend | §3b step 1. Extend or parameterize first; new tests are the last resort. |
+| Keep a test because "more coverage can't hurt" | A test that adds no line or branch coverage and covers no plan case is deleted or merged. |
+| Write a test that only verifies a mock call, restates the code, or asserts nothing | Rejected under §3b. Assert observable behaviour. |
+| Write tests for getters, DTOs, DI wiring or generated code | Trivial targets get no test. |
+| Skip the milestone sweep because every task's tests already looked minimal | Overlap only shows across tasks. Run it before the hard stop. |
+| Drop a plan-mandated test to hit the minimum | Merge it, never drop it if it covers a unique branch or acceptance criterion. |
 | Silently pass the 350k ceiling | Hard-stop and ask. The ceiling is the point. |
 | Declare "done" without running the plan's verification | Run it. Evidence first. |
 | Skip verification because "this task is trivial" | Trivial tasks break integration. Verify every one. |

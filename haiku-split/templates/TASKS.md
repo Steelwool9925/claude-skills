@@ -20,6 +20,13 @@
 - Est tokens: <n>
 - Side effects: <files, rows, or none>
 
+Code tasks (dynamic mode) add these fields to the block above; omit them otherwise:
+- Repo: <name and directory; paths below stay repo-relative>
+- Files: <exact files this task may create or edit; nothing else>
+- Parent task: <N> · score <1-10> (the parent keeps its score; this is micro-task <N>.<m>)
+- Acceptance: <exact signatures/behaviour and the exact command that proves it>
+- Verifier: main (Haiku never verifies; the main session reads the diff before anything depends on it)
+
 ### P1 — <title> (pause)
 - Source step: <target skill section/step>
 - Class: pause

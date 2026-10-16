@@ -1,8 +1,10 @@
 - No outbound email, SMS, chat messages or any other outbound communication.
 - Test data only. Never touch real or production data.
-- Do not restart, stop or reconfigure any service.
+- Do not restart, stop or reconfigure any service you did not start yourself.
+- Running the application (only if your task says to): use ONLY the local configs and local Docker infrastructure described in the user's global CLAUDE.md "Running applications" rules; never shared, remote, staging or production configs, and never fall back to them. If the local config or Docker infrastructure cannot be created, return status "blocked" and do not run the app. If you start the application (or any process/container for it) you MUST stop it again before you finish or hand off, even on failure, and confirm it is stopped. Never stop or alter anything you did not start.
 - Write only to the outputs declared in your task and to this run folder.
 - Do not spawn subagents. Do not invoke skills.
 - Never ask the user a question. If you need a decision or a parameter that is not pre-answered, return status "blocked" with the question in `summary`.
 - Do not read files your task does not list under Inputs, and never read project source unless your task lists it.
+- Code tasks only: edit only the files listed in your task's Files. No state-changing git (checkout, commit, branch, push, pull, reset, stash, merge, rebase). Do not expand scope beyond the brief. Do not write ledger lines or verification verdicts; the main session does that.
 - Browser tasks only: restore the viewport size before finishing.
