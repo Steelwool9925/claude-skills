@@ -178,7 +178,7 @@ Produce exactly three tiers.
 | Tier | Depth | Content |
 |---|---|---|
 | **1 — Status Quo** | Full | Implement using the architectural standards and patterns already present in the project. Do not optimize. Do not refactor. The only permitted additions are mandatory vulnerability and security checks. |
-| **2 — Localized Optimization** | Full | Builds on tier 1, optimising **only** the files this feature flow touches. Mandate best practices and computationally efficient data retrieval and processing. Require unit tests written specifically to prove the efficiency claim. If a required optimisation breaks standard operating bounds, state the roadblock plainly and ask for explicit approval before assuming it. |
+| **2 — Localized Optimization** | Full | Builds on tier 1, optimising **only** the files this feature flow touches. Mandate best practices and computationally efficient data retrieval and processing. Require unit tests written specifically to prove the efficiency claim, as rows in an existing test where one covers the unit. If a required optimisation breaks standard operating bounds, state the roadblock plainly and ask for explicit approval before assuming it. |
 | **3 — Global Upgrade** | **Sketch** | Prose summary only: what an unbounded rewrite would change — dependency upgrades, surrounding refactors, paradigm shifts — and why it might be worth it. Give an affected-area summary, not a file list. Expand to full depth only if the user asks. |
 
 ### File Impact Manifest
@@ -211,9 +211,12 @@ Score every tier on all of these:
 - **Estimated files created/modified:** a count plus representative paths.
 - **Estimated token effort** — Claude Code's execution effort, **never the user's wall-clock
   time**. Pick a band, then give a point figure inside it:
-  - **S (~5–15k):** 1–2 files, a localized edit following an existing pattern, minimal new tests.
-  - **M (~15–40k):** 3–6 files or one new component, some cross-file wiring, a handful of tests.
-  - **L (~40–100k):** 7+ files or a new subsystem, cross-cutting changes, broad test coverage.
+  - **S (~5–15k):** 1–2 files, a localized edit following an existing pattern, tests added as
+    rows or assertions in existing test methods.
+  - **M (~15–40k):** 3–6 files or one new component, some cross-file wiring, one test per new
+    unit with its branches as parameterized rows.
+  - **L (~40–100k):** 7+ files or a new subsystem, cross-cutting changes, tests sized by the
+    number of distinct branches, not the number of files.
   - **XL (>100k):** architectural change or migration — flag it for a follow-up split.
   The band makes two tiers comparable; the figure is your best guess inside it.
 - **Risks and unknowns.**
@@ -231,6 +234,12 @@ increment** — not "write the model layer", but "the endpoint accepts a barcode
 - *Removing or renaming* one — consumer first; the producer cannot drop it while callers remain.
 - *Changing a shape in place* — usually needs a compatible intermediate step. Say so rather than
   pretending a simultaneous deploy is possible.
+
+**Each milestone lists its test cases, kept to the minimum that covers its branches.** For each
+unit the milestone adds or changes, name the existing test file to extend (or "none found") and
+list the distinct branches as rows of one test case, not one test per scenario. Units that are
+trivial (getters, DTOs, DI wiring, generated code) get no test case. `/execute-plan` treats these
+as plan-mandated and may merge them but not drop them.
 
 Prefer milestones that leave every repo independently deployable at the boundary. Where that is
 impossible, say it plainly — an honest "these two must ship together" is worth more than a
