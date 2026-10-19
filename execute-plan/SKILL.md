@@ -1,13 +1,7 @@
 ---
 name: execute-plan
 description: >
-  Execute an approved FEATURE_PLAN milestone by milestone: decompose into atomic tasks,
-  implement and verify every one yourself in the current session under a hard token ceiling,
-  re-evaluate regressions, and hard-pause at each milestone for user testing. With --roadmap,
-  works through every Active item in .claude/roadmap.md instead, looping build / test-feature /
-  kevin / corrections per item until both come back clean. Never spawns a subagent, except Haiku
-  implementation of micro-tasks when launched via /haiku-split and confirmed per batch. Triggered
-  by /execute-plan.
+  Execute an approved FEATURE_PLAN milestone by milestone in this session under a hard token ceiling, hard-pausing for user testing, then run cleanup-crew on approval. With --roadmap, works every Active item in .claude/roadmap.md. Never spawns a subagent except Haiku micro-tasks via /haiku-split. Triggered by /execute-plan.
 disable-model-invocation: false
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, Skill, AskUserQuestion
 ---
@@ -53,7 +47,15 @@ Before starting, print the milestone's projected cost by summing the plan's per-
 While running, check the remaining budget before each task — computed from **actual tokens spent
 so far**, not the original projection. Sum the `tokens=<n>` field off every `STAT` line already
 written to the ledger this milestone (§5 requires each task to log its own real count) and
-subtract that running total from the 350k ceiling. The projection in this section is a
+subtract that running total from the 350k ceiling. Do not re-read the ledger to sum it:
+
+```bash
+node ~/.claude/skills/tooling/cli.mjs ledger.rollupFile '["<ledger path>"]'
+```
+
+returns `{tasks, tokens, remaining, nearCeiling, perRepo, correctionRound, approved, ...}` over the
+whole ledger, so note the `tokens` value when a milestone begins and subtract it to get that
+milestone's spend; `nearCeiling: true` is the hard-stop-and-ask trigger below. The projection in this section is a
 before-the-fact heads-up for the user, useful for exactly one thing: comparing against the
 ledger's actual total at the end (§5 already asks for this). It is never the number a live
 go/no-go decision is made against, because a milestone running hotter than planned must be caught
@@ -164,6 +166,11 @@ files the task changed, before and after adding tests.
 
 - A new test must raise line or branch coverage on a changed file. If it doesn't, merge it into a
   test that does, or delete it.
+- Keep coverage output out of context: run the coverage command with
+  `quiet-run.runToFile '["<repo root>", "<coverage command>", "<out file>"]'` and read the report
+  with `coverage-summary.summarize '["<lcov.info or cobertura.xml>", {"focus": ["<changed file>"]}]'`
+  (both via `node ~/.claude/skills/tooling/cli.mjs <module>.<export> '[args]'`). Never read the raw
+  report or the command's full output; grep the out file for a failing line.
 - If no coverage tool is configured, tell the user, write `cov=n/a` on the `TESTS` line, and map
   each branch of the changed code to its test by hand instead. Do not install a tool unasked.
 - Uncovered branches that are unreachable (defensive guards, impossible states) are listed in the
@@ -211,6 +218,15 @@ against the chosen tier's milestone numbers in the plan itself. A milestone with
 reads as still pending, forever, even after the plan's row is marked `Done` in the roadmap — write
 it in the same breath as printing the hard-stop message, not as an afterthought.
 
+After each approved milestone's cleanup (§6b), append:
+
+```
+CLEANUP | milestone=<N> | commit=<hash> | push=<ok|failed|skipped>
+```
+
+`plan-pruning` and the ledger rollup match only `STAT`, `APPROVED` and `CORRECTIONS` lines, so this
+line is safe alongside them.
+
 `score=` is the task's complexity-scoring result from §2 — keep it even after a later round fixes
 the task, so a resumed run can see how much scrutiny it got without re-deriving the call.
 
@@ -225,30 +241,17 @@ Keep a rollup at the top of the section: total fix rounds, cumulative tokens aga
 ceiling, and a per-repo task count.
 
 Append each `STAT` line yourself, as the last action on that task, before moving to the next one —
-this is pure bookkeeping, not a reason to route it through anything else.
+this is pure bookkeeping, not a reason to route it through anything else. The `ledger` module
+builds and appends every line type (`statLine`, `approvedLine`, `correctionsLine`, `testsLine`,
+`appendLine`), rejecting a missing field or unknown status before a bad line is written; the
+formats above stay the contract.
 
 ## 5b — Cross-repo execution
 
-When the plan names more than one repo:
-
-- **One branch per affected repo.** Each repo is independently versioned, so each needs its own
-  branch off its own `main-windows`/`main`, created in place in that repo's own directory. Create
-  them all before the milestone starts and record the mapping in the ledger — working against
-  the wrong repo directory edits the wrong repository.
-- **Every atomic task names its repo.** The task brief states the repo and its directory; paths
-  inside the brief stay repo-relative. Never work from a path you'd have to resolve against an
-  unstated root.
-- **Verification is per repo, integration is across them.** Verify each task in its own repo, then
-  ask the separate question of whether the repos still agree — a backend route rename verifies
-  perfectly while breaking the client that calls it.
-- **Respect the plan's deployment ordering.** Where a milestone states one, the task order must
-  follow it. If the plan is silent and the change crosses a contract, stop and ask rather than
-  guessing an order.
-- **Contract regeneration is a task, not a cleanup step.** If the plan names a regeneration command
-  (a generated client, a schema, stubs), run it as its own atomic task and verify its output like
-  any other diff.
-- **The 350k ceiling is per milestone, not per repo.** A milestone spanning four repos gets the
-  same budget as one spanning a single repo. Say so when projecting cost.
+Applies only when the plan names more than one repo. **Read `execute-plan/cross-repo.md` (next to
+this file) before §1 and follow it** — one branch per repo, every task names its repo, per-repo
+verification plus cross-repo integration, deployment ordering, contract regeneration as a task, and
+the 350k ceiling per milestone, not per repo.
 
 ## 6 — Isolation and milestone pause
 
@@ -291,111 +294,51 @@ Execute tasks sequentially until the milestone is complete, run the §3b milesto
 > begin the next milestone, or provide feedback for corrections.
 
 Wait for explicit input. Do not decompose the next milestone until approved. On approval, append
-the milestone's `APPROVED | milestone=<N> | by=user` line to the ledger (§5) before moving on.
+the milestone's `APPROVED | milestone=<N> | by=user` line to the ledger (§5), then run cleanup
+(§6b) before decomposing the next milestone.
+
+## 6b — Cleanup after each approved milestone
+
+Only after the `APPROVED` line is written — never on feedback, never before the user types
+'Approve'. Invoke `cleanup-crew` through the `Skill` tool, in this session, never a subagent and
+never delegated to Haiku. Tell it the milestone number, whether this is the first milestone on the
+branch, and whether the plan has finished. It runs in its *Mid-feature mode*:
+
+- **First milestone** — the full run (stash, base branch, branch name, restore, docs, reviewed
+  commit, push), with one extra hard pause: stay on the `feature/<Name>` branch §6 already created
+  (recommended) or stash and re-branch off base.
+- **Later milestones** — same branch only: drift preflight, docs refresh, summary, reviewed commit
+  and push. No branch work.
+- **Plan pruning and handoff removal** (cleanup steps 8 and 9) are deferred: step 8 runs once the
+  plan has finished (§7 passed, or the roadmap item converged), step 9 only when the whole run has
+  no work left. The plan, ledger and handoff are live recovery state until then.
+- **Cross-repo plan** — once per milestone; the branches already share a name (§5b), so ask
+  stay/re-branch once and confirm each repo's commit separately.
+
+Append the `CLEANUP` ledger line (§5) with the commit hash and push result. If the commit or push
+fails or is declined, do not start the next milestone until the user decides.
 
 ## 7 — Finish
 
 Run the plan's end-to-end verification section plus a final whole-branch review. Declare done
-only when **all** acceptance criteria and test cases pass — evidence before assertions. Then hand
-off to `superpowers:finishing-a-development-branch`, or report status plainly if the target is
-not git.
+only when **all** acceptance criteria and test cases pass — evidence before assertions. Then run
+cleanup-crew's step 8 (plan pruning), and step 9 if no work remains (§6b), and hand off to
+`superpowers:finishing-a-development-branch`, or report status plainly if the target is not git.
 
 ## 8 — Roadmap execution
 
-`/execute-plan --roadmap [--optimism <1-5>]`. A roadmap is just a list of feature plans — the
-register at `.claude/roadmap.md` (container-level too, in a workspace) that `plan-feature` writes.
-This mode works through it instead of a single plan, converging each item before moving to the
-next.
-
-**Locate the register.** If `.claude/roadmap.md` doesn't exist, say so and stop — there is
-nothing to execute. Read every row.
-
-**Select rows.** Only rows with Status `Active` are in scope, in the order they appear in the
-file — that order is the user's own priority, not something to re-sort. Skip `Future` rows: print
-which were skipped and that `plan-feature`'s Design checkpoint means they aren't meant to be built
-yet. Skip rows already `Done`. If nothing is `Active`, say so and stop.
-
-**Before starting, name the cost.** Print how many `Active` rows were found. Each one runs its own
-full build plus a test-feature/kevin convergence loop that can itself repeat several rounds — this
-is a multi-x spend over a single-plan run, the contract's escalation checkpoint. State that plainly
-before the first item starts.
-
-### Per-item convergence loop
-
-For each selected row, in order:
-
-1. **Build.** Run §0 through §7 exactly as normal against that row's Plan path. Nothing about
-   milestone execution changes in roadmap mode — the same per-milestone hard stop in §6 still
-   applies; roadmap mode does not run milestones unattended.
-2. **Grade the diff.** Invoke the `test-feature` skill (`Skill` tool) with
-   `--plan <path> --optimism <n>` (`<n>` is the roadmap invocation's `--optimism`, default 3).
-   `test-feature` never spawns subagents by its own rule — nothing extra to enforce here.
-3. **Grade the live app.** Invoke the `kevin` skill (`Skill` tool) with `--plan <path>`.
-4. **Check convergence** against both reports:
-   - **test-feature clean** — Verdict is not "do not ship", and Critical Failures is empty.
-     (Warnings may remain; those aren't the "major errors" this loop gates on.)
-   - **kevin clean** — Verdict is not "broken", every acceptance criterion/milestone in Coverage
-     is marked exercised (none partial or unreachable — a gap there means Kevin never actually
-     reached part of the feature, the opposite of understanding it completely), and Issues
-     contains no **Critical** entries. (Confusing/Minor may remain.)
-   - Both conditions must hold together.
-5. **Converged** → set the row's Status to `Done` in `.claude/roadmap.md`, print a short summary
-   (what shipped, any remaining Warnings/Confusing/Minor items left for a human to judge), then
-   **hard pause**: ask the user before starting the next `Active` row. Do not auto-advance.
-6. **Not converged** → merge the two reports' Correction Plans into one de-duplicated, repo-tagged
-   task list, and run it through this skill's own §2–§4 decompose/verify/regression loop as a
-   synthetic milestone. Log it on the item's ledger as its own round:
-   ```
-   CORRECTIONS | round=<k> | source=test-feature+kevin | items=<n>
-   ```
-   Then repeat from step 2 — re-grade with fresh test-feature and kevin runs; a correction can
-   introduce a new problem as easily as it fixes the reported one.
-7. **Round ceiling.** 5 correction rounds per item. Reaching it without converging is a hard stop,
-   not a silent continuation: report what's still failing after 5 rounds and ask the user how to
-   proceed — raise the ceiling, accept the item as-is, or drop it from this run. Never loop past it
-   unasked.
-
-**Resuming a roadmap run.** `.claude/roadmap.md`'s Status column is the resume state — rows already
-`Done` are skipped, `Active` rows pick back up at step 1. Check the item's own
-`.claude/plans/<Name>.ledger.md` for the highest `CORRECTIONS round=` line to know which round to
-resume from rather than restarting the loop at round 1.
+`/execute-plan --roadmap [--optimism <1-5>]` works through every `Active` row of
+`.claude/roadmap.md`, one item at a time, looping build / `test-feature` / `kevin` / corrections
+until both come back clean (5 correction rounds max, hard pause between items). **Read
+`execute-plan/roadmap.md` (next to this file) now and follow it in full.** Per-milestone hard stops
+and §6b cleanup are unchanged inside it.
 
 ## Haiku delegation (via /haiku-split)
 
-Applies **only** when launched as `/haiku-split execute-plan [--args "..."]`. Plain `/execute-plan`
-ignores this section. `--args` is verbatim, so write `--args "--roadmap"`. `/haiku-split` runs
-this skill in its dynamic mode: you work every step below yourself, in order, and only the
-implementation of micro-tasks goes to Haiku (`claude-haiku-4-5-20251001`).
-
-**What stays with you, unchanged:** §0 gate, §1 budget guard, §2 decompose and score (including
-the Opus ask for scores 8-10), §3 verification, §4 regression, §5 ledger, §6 branches and the
-milestone hard stop, §7 finish, and §8 including `test-feature` and `kevin` (a segment cannot
-invoke skills). Branch creation and every state-changing git command are yours; Haiku never runs
-them.
-
-**What Haiku does:** writes the code for one micro-task, nothing else. Tests stay with you: §3b
-needs the whole milestone's test files in view to extend, parameterize and sweep, which a
-single-file micro-task cannot see. Haiku briefs say "write no tests"; you write them after
-verifying the diff.
-
-1. **Split every task finer.** After §2 scores a task, cut it into micro-tasks Haiku can do
-   mechanically: one file or function, exact signatures and interfaces, an exact acceptance
-   check, within the `--task-size` token estimate. The higher the score, the finer the split. The
-   parent task keeps its score. A piece you cannot make mechanical stays with you and is
-   implemented in this session.
-2. **One batch per milestone.** Write the briefs as a run folder (see `/haiku-split` §10), then
-   the user confirms the launch (`/haiku-split` §6). Each milestone, and each correction round in
-   §8, is a new batch with a new confirmation. Never launch unconfirmed, never launch the next
-   milestone before the §6 hard stop is approved.
-3. **Verify every diff yourself (§3)** before the next brief that depends on it, or before
-   anything depends on it. A parent scored 8-10, or any large diff, gets the line-by-line pass.
-   A Haiku `DONE` line is a claim, not evidence.
-4. **A failed or rejected micro-task is fixed by you.** No second Haiku pass, no escalation to a
-   larger model, no subagent.
-5. **Ledger.** Micro-tasks log as `task=<N>.<m>`, the parent keeps `score=`, and a line may end
-   with `| by=haiku` or `| by=main`. Plan pruning reads only `APPROVED | milestone=<N> |` lines,
-   so the extra field is safe. Haiku segment spend (`startCounter - endCounter` per segment)
-   counts against the 350k ceiling in §1; add it to the `tokens=` totals alongside your own.
+Applies **only** when launched as `/haiku-split execute-plan [--args "..."]`; plain `/execute-plan`
+ignores it. Then read `execute-plan/haiku.md` (next to this file) before §2 and follow it: Haiku only
+writes code for micro-tasks; everything else, including tests, verification, the ledger, git and
+§6b cleanup, stays with you.
 
 ## Red flags — STOP
 
@@ -424,6 +367,11 @@ verifying the diff.
 | Auto-advance to the next roadmap item without asking | §8 step 5 is a hard pause. Ask before starting the next item. |
 | Keep looping corrections past the round ceiling | 5 rounds, then stop and ask. Never loop past it unasked. |
 | Execute a `Future` roadmap row | Skip it — plan-feature's Design checkpoint means it isn't meant to be built yet. |
+| Skip cleanup-crew after an approved milestone | §6b is part of the milestone. Run it after the `APPROVED` line, every time. |
+| Run cleanup-crew before the user types 'Approve', or on feedback | Only an approval triggers it. Feedback means corrections, not a commit. |
+| Run cleanup-crew's plan pruning or handoff removal mid-run | Steps 8 and 9 are deferred (§6b); the plan, ledger and handoff are live recovery state. |
+| Delegate cleanup-crew to Haiku or any subagent | It stays in the main session, including under `/haiku-split`. |
+| Start the next milestone after a failed or declined commit or push | Stop and let the user decide first. |
 
 ## Next step
 

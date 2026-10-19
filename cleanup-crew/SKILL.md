@@ -1,10 +1,7 @@
 ---
 name: cleanup-crew
 description: >
-  Stash, branch off an up-to-date base, restore work, refresh docs, and drive a reviewed
-  conventional commit and push in preparation for a pull request. Hard-pauses for the base
-  branch, the new branch name, any stash conflict, and the composed commit. Triggered by
-  /cleanup-crew.
+  Stash, branch off an up-to-date base, restore work, refresh docs, then a reviewed conventional commit and push ready for a PR. Also runs mid-feature after each approved /execute-plan milestone. Triggered by /cleanup-crew.
 disable-model-invocation: false
 model: haiku
 allowed-tools: Bash(git *), Read, Write, Edit, Glob, Grep, AskUserQuestion
@@ -18,7 +15,8 @@ branch ready for a pull request.
 **Fresh session first.** This skill needs no conversation history — only the working tree. If the
 session already carries a lot of context (earlier tickets, long test runs, browser output), say in
 one line: "Context is large — `/clear` and re-run `/cleanup-crew` to save usage." Then stop unless
-the user says to continue anyway.
+the user says to continue anyway. **Skip this advice when invoked by `/execute-plan`** (see
+*Mid-feature mode*) — that context is intentional.
 
 Execute the steps **in this exact order**. Steps marked **HARD PAUSE** stop and wait for the
 user — do not run the next git command until they answer.
@@ -73,6 +71,41 @@ not, so they can finish or revert deliberately.
 
 **Deployment ordering is not branch ordering.** The plan may require the backend to deploy first;
 that says nothing about the order you commit in. Do not reorder repos on your own initiative.
+
+## Mid-feature mode — invoked by `/execute-plan`
+
+`/execute-plan` calls this skill (`Skill` tool, current session, never a subagent) right after the
+user types 'Approve' at a milestone hard stop and the `APPROVED` ledger line is written. The caller
+passes the milestone number and whether it is the first on this branch. Telegraphing, hard pauses
+and guardrails apply unchanged; only the step list differs.
+
+**First milestone on the branch — the full run, with one adaptation.** `/execute-plan` §6 has
+already put the work on a feature branch, and `createBranch` fails on a name that exists. So if
+the current branch is not the base branch, **HARD PAUSE** (`AskUserQuestion`) before step 1:
+"Work is already on `<current>`. Stay on it (recommended), or stash and re-branch off base?"
+
+- **Stay** — skip steps 1–4. Step 7 commits and pushes `<current>`.
+- **Re-branch** — steps 1–4 as written; the new name must differ from `<current>`, which is left
+  untouched.
+
+On the base branch (or no isolation yet), steps 1–4 run as written. Then steps 0 and 5–7.
+
+**Later milestones — same branch, no branch work.** Skip steps 1–4 and never create or switch
+branches. Run 0, 5, 6, 7 on the current branch. Step 5/6 tickets: reuse the first run's, show them
+and confirm rather than re-asking. The commit title names the milestone.
+
+**Steps 8 and 9 are deferred.** The plan and ledger are live recovery state (`/execute-plan` §7
+still reads them) and so is the handoff document. Run step 8 once, when the caller says the plan
+finished (last milestone approved and §7 passed, or the roadmap item converged). Run step 9 only
+when the caller says the whole run has no work left.
+
+**Report back** the commit hash and push result; the caller logs
+`CLEANUP | milestone=<N> | commit=<hash> | push=<ok|failed|skipped>`. If the commit or push fails
+or is declined, say so — the caller does not start the next milestone until the user decides.
+
+**Cross-repo plan.** Apply *Cross-repo mode* once per milestone: the branches already share a name
+(`/execute-plan` §5b), so ask only the stay/re-branch question, once, and confirm each repo's
+commit separately.
 
 ## 0 — Drift preflight
 
@@ -301,6 +334,9 @@ Runs automatically, no hard pause — but state plainly whether a handoff docume
 - Skipping the drift preflight because "it's probably fine". It is free.
 - Deleting a plan whose ledger isn't fully approved, or one with no ledger at all — step 8 removes
   only genuinely finished plans, never mid-flight or unstarted ones.
+- Running step 8 or 9 after a mid-feature milestone — they would delete the live plan, ledger and
+  handoff. They are deferred to the end of the run.
+- Re-branching off base after milestone 2+, or without asking after milestone 1.
 - Deleting a handoff document belonging to a different workspace than the one just committed —
   step 9 matches only this session's own sanitized working-directory path.
 
