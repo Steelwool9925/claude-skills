@@ -1,10 +1,7 @@
 ---
 name: map-codebase
 description: >
-  Use when a repository or multi-repo workspace needs its architecture map built or refreshed:
-  before planning a feature, when no maps exist or a drift check reports cited paths that no
-  longer resolve, or when a session would otherwise have to read source to learn how a feature
-  flows end to end. Invoked as /map-codebase.
+  Build or refresh the architecture map of a repo or multi-repo workspace: before planning a feature, when no maps exist, or when a drift check reports stale cited paths. Invoked as /map-codebase.
 disable-model-invocation: false
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, Artifact
 ---
@@ -226,63 +223,12 @@ whole mechanism, and skipping it makes the next run pay this run's discovery cos
 
 ## Publishing
 
-**Every map this skill writes is also published as an Artifact.** The file on disk stays the
-source of truth that `/plan-feature` and `/execute-plan` read; the artifact is the copy a person
-can open and share without cloning the repo. One artifact per file, `index.md` included — a run
-that writes seven files publishes seven artifacts.
-
-### Model
-
-**Never spawn a subagent for this.** By the time a map reaches this section its content is
-finished and has passed `verify` — publishing is a mechanical read-URL/call-tool loop, but you do
-it yourself, in this session: one file at a time, or the whole batch when several maps changed in
-a run. For a republish, read the existing URL from `## Published artifacts` first — the tool
-refuses to overwrite an artifact this conversation hasn't read — then publish and fold the
-resulting URL(s) into `## Published artifacts` yourself.
-
-**Publish the `.md` file itself.** This is the explicit skill instruction the Artifact tool's
-format rule requires, and it is deliberate: rendering a map as HTML would fork its content, and a
-forked copy drifts from the file `verify` checks. Pass the map's path straight to the Artifact
-tool — no rewriting, no design pass, no `artifact-design`.
-
-Per file, pass:
-
-- **`file_path`** — the map on disk.
-- **`description`** — `<repo> · <what this map covers>`. A markdown artifact takes its filename as
-  its title, so several repos will each contribute a `data-layer`; the description is the only
-  thing separating them in the gallery. Make it specific.
-- **`favicon`** — on a first publish only. Pick one emoji for the whole run so a repo's maps read
-  as a set. Never pass it on a redeploy: the icon is how someone finds the tab again.
-
-### Republish, never duplicate
-
-`index.md` carries a `## Published artifacts` table pairing each map with its URL. **Read it
-before publishing anything.** For every map already listed, pass its `url` so the publish
-**updates that artifact in place**. Publishing without `url` from a later session creates a
-*second* artifact instead, and the link a teammate bookmarked quietly goes stale.
-
-The tool refuses to overwrite an artifact this conversation has not read, so on `--update`: read
-each URL first, then build the republish on what came back. Write the table back afterwards,
-adding a row for every map published for the first time.
-
-Record the URLs as plain markdown links, **not in backticks**. `verify`'s drift checker only
-inspects backticked tokens, and a URL has no business being resolved as a repo path.
-
-### Guardrail
-
-Publishing sends the map to an external service. Artifacts start private, but the copy has left
-the machine either way — so the contract's read-only guardrail matters more here, not less:
-
-**Run `verify` before publishing, not after.** Its `guardrail` array is the only thing standing
-between a secret-shaped string in a map and a published copy of one. If it reports any hit, fix
-the map and re-run; **do not publish a map that failed the guardrail check.**
-
-Nothing about publishing relaxes what a map may contain. No commands outside
-`## Build & test commands`, no secrets, no file contents — the same rules, now with a wider
-audience.
-
-If publishing is unavailable or refused, say so plainly, leave the files on disk, and finish the
-run. The maps are the deliverable; the artifacts are a convenience.
+Every map written is also published as an Artifact (one per file, `index.md` included); the file on
+disk stays the source of truth. Once the maps are finished, **run `verify` first and do not publish
+a map that failed its `guardrail` check**, then read `map-codebase/publishing.md` (next to this
+file) and follow it: publish the `.md` file itself, in this session, never via a subagent; read
+`## Published artifacts` first and pass each existing `url` so a republish updates in place. If
+publishing is unavailable or refused, say so, leave the files on disk and finish the run.
 
 ## Staleness check
 
@@ -295,45 +241,11 @@ One cheap `Glob` batch decides this. **Never re-walk the tree "to make sure."**
 
 ## Haiku delegation (via /haiku-split)
 
-Applies **only** when launched as `/haiku-split map-codebase [--args "..."]`. Plain
-`/map-codebase` ignores this section. `--args` is verbatim, so write `--args "--update"` or
-`--args "--root <dir>"`. `--verify` never delegates: it is one script call. `/haiku-split` runs
-this skill in its dynamic mode: you work every step yourself, in order, and only the drafting of
-domain maps and digests of long project docs go to Haiku (`claude-haiku-4-5-20251001`).
-
-**What stays with you, unchanged:** §0 model floor, Preflight (`scan`, the search-hints ledger,
-`gitignore --write`), deciding which docs are authoritative, carving domains, `index.md`,
-`ARCHITECTURE_MAP.md`, `## Build & test commands` (including asking the user on `stackHint`), the
-search-hints ledger, every `verify` run and its guardrail check, and all of `## Publishing`.
-
-**What Haiku does:**
-
-1. **Doc digest (optional).** A long project doc (Preflight step 3) can go to Haiku as one brief:
-   the doc path, the sections to read (architecture, build, gotchas), and an output file of short
-   bullet claims, each with the heading it came from. You still read the cited headings yourself
-   wherever the digest decides a domain boundary or contradicts the tree.
-2. **Domain map draft.** After you carve domains, write one brief per domain map to write (on
-   `--update`, only maps whose `regenerate` is true). Inline: the domain name and purpose, its
-   anchor entry points, the exact files Haiku may read, the `## What to write` template and rules
-   copied in full (backticked exact-case paths, required `## Structure`, `Generated: <date>
-   (<sha>)` with the sha you give it, explicit side effects or "(none)", mermaid only above three
-   steps, no code, no commands, no secrets or config contents), and the output path
-   `.claude/maps/<domain>.md`. Haiku never reads files outside its list and never writes
-   `index.md`.
-3. **Mechanical done-check.** The draft exists at its path, carries the `Generated:` line,
-   `## Structure` and at least one `## Flow:` with all four parts, and
-   `node ~/.claude/skills/map-codebase/map.mjs verify` reports no drift, empty map or guardrail
-   hit for it. Haiku also writes the locations it found to `notes.md` as candidate ledger lines.
-4. **One batch per run.** A full build or `--update` is one batch, confirmed by the user before
-   launch.
-5. **Verify every draft yourself** before it is cited, published or folded into `index.md`: read
-   it in full; for each flow open its entry point and confirm the call order; check every side
-   effect line against source and look for missed ones (db writes, external calls, queues, file
-   writes, cache invalidations); check the domain doesn't contradict an authoritative doc. A
-   Haiku `DONE` line is a claim, not evidence. You fold the candidate ledger lines in after
-   checking them.
-6. **A failed or wrong draft is fixed by you** in this session. No second Haiku pass, no
-   escalation to a larger model, no subagent. Publishing never goes to Haiku.
+Applies **only** when launched as `/haiku-split map-codebase [--args "..."]`; plain `/map-codebase`
+ignores it and never delegates, and `--verify` never delegates. Then read `map-codebase/haiku.md`
+(next to this file) before Preflight and follow it: Haiku may only digest long project docs and draft
+domain maps; scan, domain carving, `index.md`, the ledger, every `verify` run and all publishing stay
+with you, and you check every draft against source.
 
 ## Common mistakes
 

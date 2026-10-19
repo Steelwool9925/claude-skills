@@ -6,9 +6,11 @@ defined. A skill that needs to know where something lives cites a section here r
 restating it, so a path change is a one-file edit.
 
 The chain is a convention, not an automation: no stage invokes the next; each ends by naming the
-command that would typically follow. **The one exception is `/execute-plan --roadmap`**, which
+command that would typically follow. **The exceptions are `/execute-plan --roadmap`**, which
 invokes `test-feature` and `kevin` itself as part of its own per-item convergence loop — see
-`execute-plan`'s §11.
+`execute-plan`'s §11 — **and every `/execute-plan` mode, which invokes `cleanup-crew`** (main
+session, via the Skill tool) after each approved milestone — see `execute-plan`'s §6b and
+`cleanup-crew`'s "Mid-feature mode". Plan pruning and handoff removal wait for the end of the run.
 
 ```
 /map-codebase  →  /plan-feature  →  /execute-plan  →  /test-feature  →  /cleanup-crew
@@ -249,7 +251,7 @@ segments (`claude-haiku-4-5-20251001`), and only for the delegation points those
 briefed flows for `kevin`; domain map drafts and doc digests for `map-codebase` (never publishing
 or `--verify`). Every launch (each milestone batch, each correction round, each plan-feature
 batch, each kevin or map-codebase batch) needs the user's own confirmation, and a resume is a new
-run. The main session still does all design, scoring, grading, verification, ledger and git work,
+run. The main session still does all design, scoring, grading, verification, ledger, git and `cleanup-crew` work,
 and a failed piece is fixed by the main session, never escalated. Plain `/execute-plan`,
 `/plan-feature`, `/kevin` and `/map-codebase`, `test-feature` and `code-review` stay no-subagent;
 `test-feature` and `kevin` run in the main session during the `--roadmap` loop.

@@ -1,10 +1,7 @@
 ---
 name: haiku-split
 description: >
-  Take any skill in ~/.claude/skills and split all of its steps into Haiku-sized tasks, then run
-  them as a chained, context-capped Haiku Workflow with handoff files. Writes a task spec and a
-  workflow script to a run folder and launches only after you confirm that run. Judgment and
-  approval steps stay with the main session. Triggered by /haiku-split.
+  Split any skill in ~/.claude/skills into Haiku-sized tasks and run them as a chained, context-capped Haiku Workflow with handoff files; launches only after you confirm. Judgment and approval steps stay with the main session. Triggered by /haiku-split.
 disable-model-invocation: false
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, AskUserQuestion, Workflow
 ---
@@ -148,6 +145,9 @@ only for those points, only for a launch the user confirms in step 4.
 Haiku never sees the target skill, never invokes a skill, never verifies its own work and never
 runs state-changing git. A piece that cannot be written as a mechanical brief with a mechanical
 done-check stays with the main session.
+
+This includes the target's own skill invocations: `execute-plan`'s per-milestone `cleanup-crew`
+run (its §6b) is a main-session Skill call, never a Haiku segment.
 
 At each delegation point:
 

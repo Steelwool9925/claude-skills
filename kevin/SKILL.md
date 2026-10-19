@@ -1,11 +1,7 @@
 ---
 name: kevin
 description: >
-  Drive a live feature — or a whole map domain, or the entire project end-to-end — through its
-  actual frontend as a careless first-time user, deliberately mistyping, misclicking and
-  mishandling every step, and report every bug, crash, dead end and confusing moment encountered
-  along the way. Reads a FEATURE_PLAN or the codebase map to know what's meant to do, never
-  source. Triggered by /kevin.
+  Drive a live feature, map domain or whole project through its real frontend as a careless first-time user (mistyping, misclicking) and report every bug, crash and dead end. Reads a FEATURE_PLAN or codebase map, never source. Triggered by /kevin.
 disable-model-invocation: false
 allowed-tools: Bash, Read, Write, Glob, Grep, Skill, AskUserQuestion, Artifact, mcp__claude-in-chrome, mcp__plugin_chrome-devtools-mcp_chrome-devtools
 ---
@@ -132,17 +128,27 @@ Invoke the `run` skill to launch, or confirm, the app. If it needs a base URL yo
 run without one, and which one is present varies by machine and by session. Check, in order, and use
 the first that is actually available:
 
-1. **Claude in Chrome** — the `claude-in-chrome` skill plus `mcp__claude-in-chrome__*` tools. Invoke
-   the skill before touching any of its tools; it gates on site permissions that must be set up
-   first.
-2. **Chrome DevTools MCP** — the `chrome-devtools-mcp:chrome-devtools` skill plus
+1. **Local Playwright runner (default)** — `node ~/.claude/skills/browser-runner/runner.mjs <cmd>`
+   (command table in `browser-runner/README.md`). Available when `~/.claude/skills/browser-runner/
+   node_modules` exists; if the folder exists without it, ask the user to run `cd browser-runner &&
+   npm i`, then continue. Run every call from the repo root so output lands in `.claude/browser/`.
+   Flow: `start` → `open <baseUrl>` → act → `stop` at the end of the run (`start --headed` only if
+   the user wants to watch). It prints 1-4 lines per call and writes snapshots, screenshots, text,
+   console and network output to numbered files, so none of that bulk enters context. Selectors are
+   Playwright selectors (`text=Save`, `role=button[name="Save"]`, CSS); a snapshot is an
+   accessibility-tree YAML file with no element ids, so act by text, role or selector.
+2. **Claude in Chrome** (fallback) — the `claude-in-chrome` skill plus `mcp__claude-in-chrome__*`
+   tools. Invoke the skill before touching any of its tools; it gates on site permissions that must
+   be set up first.
+3. **Chrome DevTools MCP** (fallback) — the `chrome-devtools-mcp:chrome-devtools` skill plus
    `mcp__*chrome-devtools__*` tools (`navigate_page`, `click`, `fill`, `take_snapshot`,
    `take_screenshot`). Invoke that skill first for the same reason.
 
-**Neither available → stop and say so.** Name which surface you looked for and ask the user to
-enable one. Do not fall back to `curl`, to reading source, or to reasoning about what the UI probably
-does — a Kevin report is only worth anything if a real browser actually drove the real app, and an
-imagined pass is worse than no report. This is the same hard-pause as a missing base URL above.
+**None available → stop and say so.** Name which surfaces you looked for (the runner first) and ask
+the user to enable one. Do not fall back to `curl`, to reading source, or to reasoning about what the
+UI probably does — a Kevin report is only worth anything if a real browser actually drove the real
+app, and an imagined pass is worse than no report. This is the same hard-pause as a missing base URL
+above.
 
 **Test data only.** Never submit to a real payment processor, a real outbound email/SMS
 recipient, or anything that notifies a real third party. If the flow requires one of these, ask
@@ -160,7 +166,7 @@ frontend from unreachable into drivable, the same way a running dev server does 
 - Act: `adb shell input tap <x> <y>`, `adb shell input text "..."`, `adb shell input keyevent
   KEYCODE_BACK` (and other `KEYCODE_*` as needed).
 - Look: `adb exec-out screencap -p > file.png`, then read the PNG — there's no accessibility-tree
-  snapshot like `take_snapshot`, so screenshot before *and* after each action rather than guessing
+  snapshot on this surface, so screenshot before *and* after each action rather than guessing
   coordinates blind. `adb shell uiautomator dump` gives an XML layout dump when a screenshot alone
   doesn't pin down where to tap.
 - Toggle device state the feature depends on: `adb shell svc nfc enable|disable`, `adb shell svc
@@ -203,15 +209,22 @@ wrong) — never skip because the correct-only pass is faster.
 **Interact only through the rendered page** — clicks, typing, keyboard, scroll — exactly what a
 mouse-and-keyboard user could do. Never call an API directly, edit `localStorage`/cookies/network
 requests to force a state, or open devtools to route around a stuck UI. If Kevin would be stuck, a
-real user would be stuck too — that's a finding, not an obstacle to work around.
+real user would be stuck too — that's a finding, not an obstacle to work around. The runner has no
+script-evaluation command by design; don't reach for an MCP `evaluate` equivalent either.
 
-**Keep browser output small — every MCP result stays in context for the rest of the session.**
-- Default to `take_snapshot` (text) to read page state; reach for `take_screenshot` only for the
-  correct-pass step shots below, and for a finding that is genuinely visual (layout, colour,
-  overlap). At most one screenshot per finding.
+**Keep browser output small — every tool result stays in context for the rest of the session.**
+- With the runner, calls print 1-4 lines and write bulky output to numbered files in
+  `.claude/browser/` (`NNN-snapshot.yml`, `NNN-screenshot.png`, `NNN-text.txt`, `NNN-console.json`,
+  `NNN-network.json`). Read a file only when the summary isn't enough, and `grep` a snapshot for the
+  element you need rather than reading it whole.
+- Never read a screenshot into context unless a finding needs it (once per finding). Take
+  correct-pass step shots, `cp` them by name into the run folder, and let a script encode them later
+  (§5, §6.5); don't read them.
 - Never re-snapshot or re-screenshot a screen that has not changed since the last one.
-- Page `list_console_messages` / `list_network_requests` (small `pageSize`, filter by type) and
-  fetch one request or message by id, rather than dumping the whole list.
+- If on an MCP surface instead: default to `take_snapshot` (text), use `take_screenshot` only for
+  correct-pass step shots and genuinely visual findings (at most one per finding), and page
+  `list_console_messages` / `list_network_requests` (small `pageSize`, filter by type), fetching one
+  request or message by id rather than dumping the list.
 - In `--e2e` or any multi-domain run, `/compact` between domains; when the run is finished, tell
   the user to `/clear` before the next task.
 
@@ -374,6 +387,9 @@ not the developer reading the Correction Plan — a different audience from the 
   capture. The published page can't load images from local disk or the Chrome session — base64-
   encode each PNG and inline it as a `data:image/png;base64,...` `<img>` next to its step. Skip a
   step's image only if no clean screenshot exists for it; never substitute an error-state one.
+  Runner screenshots are already PNG files in `.claude/browser/`: `cp` each clean one to the run
+  folder by name and base64-encode it with a one-line Node command (`fs.readFileSync(p,'base64')`),
+  never by reading the image into context.
 - Report the published URL in the terminal alongside the report's path — it isn't written into the
   report file, and it isn't one of the pipeline's `.claude/` artifacts.
 
@@ -384,171 +400,17 @@ plan's title/acceptance criteria, the base64-encoded screenshots per step, and t
 
 ## 6 — End-to-end mode (`--e2e`)
 
-Replaces §3–§5 for this invocation. §1 (get the app running), §2 (persona) and §2b (every avenue)
-still apply, applied per-flow below.
-
-### 6.1 — Cost checkpoint (every run, before touching the app)
-
-- Read `.claude/maps/index.md` (container-level in a workspace) and count the domains and the
-  flows listed under each.
-- State that count out loud, and that a full-persona pass (§2's mistake-then-correct pattern, per
-  step) **plus one `ui-ux-pro-max` expert critique per domain** (§3b/§6.2) across every one of them
-  is a large, multi-domain spend — the same escalation checkpoint `pipeline-contract.md`'s
-  cost-discipline section requires before any multi-x jump. Naming only the domain/flow count and
-  leaving out the per-domain critique understates what's actually being approved.
-- State the required model floor from §0b in the same breath — `--e2e` needs at least Sonnet 5,
-  Opus 5 **required** (not just recommended) past ~5 domains. If the session is below the floor for
-  the domain count just counted, stop here and ask the user to switch (`/model`) before continuing.
-- **Ask before proceeding.** This runs every time, regardless of how few domains the map has —
-  `--e2e` *is* the multi-x jump that checkpoint exists for, not a case that might be small enough
-  to skip it.
-- **Below the Opus floor for the domain count just named → offer the split-execution alternative
-  (§0b) before falling back to scoping down.** Run §6.2's per-domain coverage one domain at a time
-  under Sonnet 5 — same content a `--domain` run would produce: coverage, issues, and that domain's
-  UI/UX rating — collecting each domain's findings and clean screenshots as you go. Once every
-  domain is covered, ask the user to switch to Opus 5, then run §6.3's cross-domain journey and
-  §6.4/§6.5's consolidated report + `ONBOARDING.md` refresh under Opus 5, folding in the
-  Sonnet-collected per-domain sections rather than re-grading them. Note in the consolidated
-  report's header that per-domain coverage ran under split execution. If the user declines this
-  too, fall back to switching the whole run to Opus 5, or scoping down to specific `--domain` runs
-  instead of a partial `--e2e`.
-
-### 6.2 — Per-domain coverage
-
-Apply §2's persona and §2b's every-avenue coverage to every `## Flow:` in every domain the index
-lists — same mistake-then-correct pattern per step as single-feature mode, same
-exercised/partial/unreachable tracking as §3. Rate
-each domain with §3b's UI/UX rating too — persona score plus the `ui-ux-pro-max` expert critique
-against that domain's clean screenshots. `--e2e` has no single plan behind any one domain, so the
-Design Direction check is always "n/a" here — never invented.
-
-**Under split execution** (§0b/§6.1), this section runs once per domain as its own Sonnet-5 pass —
-same coverage, issues and UI/UX rating content as above, just scored and run separately rather than
-as part of one aggregate Opus-tier session. Carry each domain's findings and clean screenshots
-forward to §6.3-6.5 rather than re-deriving them once the session switches to Opus 5.
-
-### 6.3 — Cross-domain journey
-
-Run `map.mjs edges` for candidate couplings between domains (shared auth, a sequential business
-process, shared queue/topic or route names). **Confirm a candidate is real before building a
-journey on it** — per `pipeline-contract.md`, edges are candidates, not conclusions, and the same
-string can appear in two domains by coincidence. Cover **every** confirmed edge a real user's
-session would actually cross (not just one — the same every-avenue standard §2b sets within a
-single feature applies across domains here too), drive each start to finish through the UI, and
-apply §2's persona at each step exactly as any other flow. A candidate that doesn't hold up gets
-said so in the report, not a journey built on it anyway.
-
-### 6.4 — Report
-
-Write one consolidated report: `.claude/reports/KEVIN_REPORT_e2e-<ISO date>.md` (container-level
-for a workspace) — a new dated file every run; past runs stay on disk.
-
-```markdown
-# Kevin E2E Report
-URL: <base-url>   Generated: <ISO date>
-
-## Verdict
-<one line: usable / confusing in places / broken>
-
-## Domains
-### <domain>
-<same Coverage + Issues structure as §3/§4, scoped to this domain>
-<same UI/UX Rating structure as §4, Design Direction line fixed to "n/a — e2e mode">
-
-### <domain>
-...
-
-## Cross-domain journey: <name>
-<same Coverage + Issues structure, for the chained journey — repeat this section once per confirmed edge, or write "none confirmed" and why if none held up>
-
-## Correction Plan
-1. [repo] [domain] <atomic fix — area if inferable, what, why>
-2. [repo] [domain] [UI/UX] <atomic fix, from a concrete expert-critique violation only>
-3. ...
-```
-
-Severity definitions (Critical/Confusing/Minor) are unchanged from §4.
-
-### 6.5 — Onboarding doc (replaces §5 for this mode)
-
-`--e2e`'s audience deliverable is a living guide, not a one-off announcement — refreshed every run
-rather than published once per feature.
-
-- **Regenerate `<repo-or-container-root>/ONBOARDING.md`** — repo root for a single repo, the
-  container root for a workspace. Unlike every other pipeline artifact, **this file is not
-  gitignored**: it is meant to be checked in and read by people, not tooling.
-- Source it the way §5 sources its announcement: each domain's map functional description (title,
-  flows, purpose) — never the Issues section, the Correction Plan, or source files.
-- One section per domain (what it does, how to use it, numbered everyday steps), plus a short
-  section for the cross-domain journey. No internal jargon, no mention of testing, QA, kevin,
-  screenshots-as-evidence, severities, or file paths — same voice as §5's announcement.
-- **Illustrate with clean screenshots** the same way §5 does: inline as base64
-  `data:image/png;base64,...`, one per major step, skipped only where no clean screenshot exists —
-  never substitute an error-state one.
-- **Publish/republish it as an Artifact, reusing the same URL every run:**
-  - First run: publish it, then write the URL into a hidden HTML comment at the very top of the
-    file: `<!-- kevin-e2e-artifact: <url> -->`.
-  - Every later run: read that comment before publishing, pass its URL to the Artifact tool so the
-    same page updates in place, and leave the comment as-is unless the URL genuinely changed.
-  - Publishing fails or is unavailable → say so, leave the comment untouched, keep the file on
-    disk. The file is the deliverable; the Artifact is a convenience, same as `map-codebase`'s
-    maps.
-
-**Never spawn a subagent for this.** Same reasoning as §5: the domain grading is done by this
-point, so draft/regenerate `ONBOARDING.md` and publish it yourself, in this session, using each
-domain's map functional description, the screenshots, the existing artifact-comment URL (if any),
-and the voice/content rules above. Perform the read-before-republish yourself before publishing.
-
-**Watch your own context on this one.** This is the pipeline's heaviest brief: every domain's
-description plus every screenshot, in a mode that only runs when there are many domains. Encoded
-screenshots are the bulk of it. If it risks overflowing the session's context, work through it
-domain by domain — draft and stage each domain's section, then assemble and publish once all are
-ready — rather than trying to hold every domain's screenshots in context at once.
+Replaces §3–§5 for this invocation; §1, §2 and §2b still apply per-flow. **For `--e2e`, read
+`kevin/e2e.md` (next to this file) now and follow it in full** — §6.1 cost checkpoint (runs every
+time, before touching the app), §6.2 per-domain coverage, §6.3 cross-domain journey, §6.4 report,
+§6.5 `ONBOARDING.md` + Artifact. Skip this section entirely in `--plan`/`--domain` mode.
 
 ## Haiku delegation (via /haiku-split)
 
-Applies **only** when launched as `/haiku-split kevin [--args "..."]`. Plain `/kevin` ignores this
-section. `--args` is verbatim, so write `--args "--plan <path>"`, `--args "--domain <name>"` or
-`--args "--e2e"`. `/haiku-split` runs this skill in its dynamic mode: you work every step yourself,
-in order, and only the browser driving of named flows goes to Haiku (`claude-haiku-4-5-20251001`).
-
-**What stays with you, unchanged:** §0 gate and plan/map lookup, §0b model floor (it gates the
-grading and synthesis this session does, not the Haiku driving), §1 getting the app running,
-picking the browser surface and securing safe test targets, §3's coverage verdicts, §3b UI/UX
-rating (including the `ui-ux-pro-max` critique — a segment cannot invoke skills), §3c confirming
-`map.mjs edges` candidates, §4 report, severities and Correction Plan, §5 announcement, §6.1 cost
-checkpoint, §6.3 cross-domain journey, §6.4 report and §6.5 onboarding doc.
-
-**What Haiku does:** drives the live UI through the steps you list, records what happened, nothing
-else.
-
-1. **One brief per flow or criterion.** After §1 has the app up and the browser surface chosen,
-   write each acceptance criterion (§3), map `## Flow:` (§3 `--domain`, §6.2), or confirmed §3c
-   regression check as one brief. Inline: the base URL, the browser surface's tool names, the
-   steps in order, the mistake to try at each step (§2's list, varied across briefs), every
-   legitimate route to try (§2b), the safe test data to use, and where to save output. A §3c
-   brief is correct-usage only. The full start-to-finish continuous run (§3) is its own brief.
-2. **Persona rules go in the brief, not by reference.** Haiku never sees this skill, so copy in:
-   interact only through the rendered page; never call an API, edit storage/cookies/requests or
-   use devtools to get unstuck — stuck is a finding; never read source, a manifest, a diff or a
-   map's `## Structure` paths; snapshot by default, screenshot only clean correct-pass step states
-   and at most one per visual finding; console/network output only as evidence for a symptom seen
-   on screen.
-3. **Mechanical done-check.** Each brief's output is one block per step in `notes.md`: step,
-   mistake tried + what the page did, each route tried + result, status
-   (`exercised | partial | unreachable`), and any finding as `symptom | repro steps | expected |
-   actual | screenshot path`. Clean screenshots go to `<run folder>/shots/<brief>-<step>.png`.
-   A step with no block, or a finding with no repro steps, fails the check.
-4. **One batch per mode run.** `--plan`/`--domain`: one batch. `--e2e`: one batch per domain,
-   matching split execution's per-domain passes (§0b/§6.1), each with its own confirmation.
-5. **Verify every Haiku result yourself** before it goes in the report: replay every Critical and
-   blocking finding's repro steps in the browser and confirm it reproduces; check each claimed
-   `exercised` step against its snapshot or screenshot; open each clean screenshot before it feeds
-   §3b or §5. A finding that doesn't reproduce is dropped or re-driven by you. A Haiku `DONE`
-   line is a claim, not evidence.
-6. **A failed, blocked or unverifiable brief is redone by you** in this session. No second Haiku
-   pass, no escalation to a larger model, no subagent. Note in the report header which coverage
-   ran via Haiku.
+Applies **only** when launched as `/haiku-split kevin [--args "..."]`; plain `/kevin` ignores it.
+In that case read `kevin/haiku.md` (next to this file) before §1 and follow it: Haiku only drives
+briefed flows; the gate, model floor, grading, UI/UX critique, reports, announcement/onboarding and
+cross-domain work stay with you, and you verify every Haiku result.
 
 ## Common mistakes
 

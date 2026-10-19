@@ -17,10 +17,10 @@ hard-pauses for me at the decisions that are mine to make. One further skill,
 |---|---|---|
 | **`/map-codebase`** | Builds high-signal architecture maps so later sessions understand end-to-end feature flows without reading source. Gates the session's own model (Sonnet 5 floor) on a full build or `--update`; `--verify` is a zero-token drift check with no model floor. | architecture maps |
 | **`/plan-feature`** | Turns an Azure DevOps ticket **or** a written description into a three-tier implementation plan with File Impact Manifests, scored effort, milestones and hard pauses. Scores feature complexity and gates the session's own model (Sonnet vs Opus). Never touches source. | the plan file |
-| **`/execute-plan`** | Executes an approved plan milestone by milestone: decomposes into atomic tasks, scores each one, implements and verifies every task itself in the current session under a hard token ceiling, re-checks regressions, and stops at each milestone for me to test. `--roadmap` loops build/test-feature/kevin across every active roadmap item. | source + a ledger |
+| **`/execute-plan`** | Executes an approved plan milestone by milestone: decomposes into atomic tasks, scores each one, implements and verifies every task itself in the current session under a hard token ceiling, re-checks regressions, and stops at each milestone for me to test. `--roadmap` loops build/test-feature/kevin across every active roadmap item. After each approved milestone it runs `/cleanup-crew` (full run after milestone 1, same-branch commit and push after the rest). | source + a ledger |
 | **`/test-feature`** | Grades the implemented feature against its plan at a chosen rigour (`--optimism 1-5`), measuring real coverage at level 3+, tracing the feature end to end with systematic debugging, and checking completeness, security, deployment, pipeline and efficiency. Never spawns subagents — the whole run stays in one evidence trail. Never touches source. | a test report |
 | **`/kevin`** | Plays a careless first-time user through the live frontend — a feature, a whole map domain, or the entire project — deliberately mistyping and misclicking, and reports every bug, crash and confusing moment. Reads the plan/map, never source. | a bug report (+ onboarding doc) |
-| **`/cleanup-crew`** | Stashes, branches off an up-to-date base, restores the work, refreshes docs, and drives a reviewed conventional commit and push ready for a PR. | a branch + commit |
+| **`/cleanup-crew`** | Stashes, branches off an up-to-date base, restores the work, refreshes docs, and drives a reviewed conventional commit and push ready for a PR. Also runs per milestone from `/execute-plan` in a mid-feature mode. | a branch + commit |
 | **`/haiku-split`** | Splits any skill's steps into Haiku-sized tasks and runs them as a chained, context-capped Haiku Workflow with handoff files. Launches only after you confirm each run; judgment and approval steps stay with the main session. | a run folder (task spec + workflow script + notes) |
 
 `_shared/pipeline-contract.md` holds the artifact paths, repo resolution, `<Name>` derivation, cost
@@ -126,9 +126,10 @@ never a standing "work autonomously" instruction. See `_shared/pipeline-contract
 
 ### Required — a browser surface, for `/kevin`
 
-`/kevin` drives a real frontend and cannot run without one. It checks for **Claude in Chrome**
-(`claude-in-chrome` skill + `mcp__claude-in-chrome__*`) first, then **Chrome DevTools MCP**
-(`chrome-devtools-mcp:chrome-devtools` + `mcp__*chrome-devtools__*`), and stops if neither is
+`/kevin` drives a real frontend and cannot run without one. It uses the local **Playwright runner**
+(`browser-runner/`; run `npm i` inside it once) first, then falls back to **Claude in Chrome**
+(`claude-in-chrome` skill + `mcp__claude-in-chrome__*`), then **Chrome DevTools MCP**
+(`chrome-devtools-mcp:chrome-devtools` + `mcp__*chrome-devtools__*`), and stops if none is
 available. It never substitutes reading source or `curl` for actually driving the app.
 
 ### Optional — `ado-status`

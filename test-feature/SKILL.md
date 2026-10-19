@@ -1,10 +1,7 @@
 ---
 name: test-feature
 description: >
-  Grade an implemented feature against its plan at a chosen rigour level (--optimism 1-5),
-  measuring real coverage at level 3 and above, judging test effectiveness, and checking
-  completeness, security, deployment, pipeline and efficiency vectors. Writes only a test
-  report, never source. Triggered by /test-feature.
+  Grade an implemented feature against its plan at a chosen rigour level (--optimism 1-5): real coverage at level 3+, test effectiveness, completeness, security, deployment, pipeline and efficiency. Writes only a test report. Triggered by /test-feature.
 disable-model-invocation: false
 allowed-tools: Bash, Read, Write, Glob, Grep, AskUserQuestion
 ---
@@ -118,7 +115,17 @@ back to running the plain test command without coverage.
 the file extensions actually present, and **ask the user for the build and test commands.** A
 wrong command wastes a run and can produce misleading output; asking costs one question.
 
-Parse into overall % and per-file %, then bucket:
+**Keep the noise out of context.** Run the coverage command through
+`node ~/.claude/skills/tooling/cli.mjs quiet-run.runToFile '[root, command, outFile]'` — the full
+output goes to the file and only a few-line result (`exitCode`, `tail`, `errorLines`) comes back;
+grep the file for detail. Then condense the report instead of hand-parsing it:
+`node ~/.claude/skills/tooling/cli.mjs coverage-summary.summarize '[reportPath, {"focus": [<changed files>], "threshold": 80}]'`
+(Cobertura `**/coverage.cobertura.xml` for dotnet, `coverage/lcov.info` for node/flutter). It
+returns overall %, the buckets below and the uncovered ranges per file; never read a raw report.
+Stacks with no lcov/Cobertura output (JaCoCo, `go -cover`, `phpunit --coverage-text`) are read from
+the command's file output by grep.
+
+Overall % and per-file %, bucketed:
 
 - **Critical** — 0% covered
 - **Partial** — 1–79%
@@ -151,46 +158,12 @@ If the plan names more than one repo (its `**Repos:**` line and the manifest's R
 
 ## 2b — End-to-end trace (systematic debugging)
 
-**REQUIRED BACKGROUND:** invoke `superpowers:systematic-debugging` and apply its Phase 1–3 here.
-Phase 4 (implementing a fix) does **not** apply: this skill never edits source, so every root
-cause found becomes a Correction Plan item.
-
-Coverage says which lines ran, not whether the feature works from entry to exit. Trace the real
-path: **entry point** (UI action, route, CLI, queue message) → each layer (controller/handler →
-service → data access → external calls) → **persistence** → **response/side effect** → back to the
-caller. Take the path from the plan's manifest, or the map's flow for the feature (§0 fallback).
-
-1. **Reproduce.** Drive the path with the cheapest real trigger: a test that already exercises it,
-   else a request/CLI call against a locally started app (`curl`, the project's own run script).
-   Record exact input and exact output.
-2. **Instrument boundaries without touching source.** At each layer boundary, record what enters
-   and what exits, using existing logs, verbose test output (`-v`, `--logger "console;verbosity=detailed"`),
-   debugger/trace flags, or a throwaway script in the scratchpad. Never add log lines to the repo.
-3. **Locate the break.** Follow the first wrong value backwards to where it originated. Fix
-   nothing at the symptom; name the originating layer, file and line.
-4. **Hypothesis, one at a time.** State "X is the root cause because Y", then confirm with the
-   smallest experiment (a different input, a single test run). Refuted → new hypothesis; never
-   stack guesses.
-5. **Record.** Each defect gets: trigger, evidence (command + output), root cause, and the
-   layer where it originates. A failed path with no confirmed root cause is reported as
-   *unexplained*, with what was ruled out — never as a guessed cause.
-
-Scale with `--optimism`:
-
-| Level | Trace |
-|---|---|
-| 1–2 | Static walk of the path through the diff and map; no execution. Label findings as estimates (§3). |
-| 3 | Run the primary happy path end to end, plus one failure input per layer boundary. |
-| 4 | Every path the plan names: happy, validation failure, dependency failure, boundary values, concurrent or repeated calls. |
-| 5 | Level 4, plus hostile input at the entry point and partial failure mid-path (persistence written, response lost). |
-
-Cross-repo features: trace across the seam — request leaves repo A, is received and parsed by repo
-B, and the response is consumed back in A. A path that breaks only at the seam is a contract
-finding.
-
-If the app cannot be started, or a dependency (database, queue, third party) is unavailable, say so,
-trace as far as the evidence reaches, and mark the remainder unverified. Three failed hypotheses on
-one defect means stop and report a suspected design problem instead of a fourth guess.
+Coverage says which lines ran, not whether the feature works entry to exit. **Read
+`test-feature/trace.md` (next to this file) before tracing and follow it in full:** invoke
+`superpowers:systematic-debugging` (Phase 1–3 only, never edit source), trace entry point → layers →
+persistence → response, reproduce, instrument boundaries without touching source, one hypothesis at a
+time, record trigger/evidence/root cause. The depth table scales with `--optimism`; cross-repo
+features are traced across the seam.
 
 ## 3 — Evidence before assertions
 
@@ -243,47 +216,10 @@ Every level evaluates all five. Intensity scales with optimism; **none may be sk
 
 ## 6 — Stack-specific checklist
 
-Apply the checklist for the **detected stack only**. If the stack is not listed here, apply the
-five mandatory vectors and say plainly that no stack-specific checklist was available — do not
-transplant one stack's idioms onto another.
-
-### .NET
-
-- **LINQ / data:** N+1 query patterns. `.ToList()` called before filtering.
-- **Architecture:** dependency injection bypassed. Controllers bloated with business logic.
-- **Security:** user input unsanitised. Secrets hardcoded.
-- **C# practice:** async methods missing `ConfigureAwait` or `CancellationToken`. Nulls handled
-  properly. Async state machine and GC traps.
-
-### JS / TS / Node
-
-Unawaited promises and floating rejections. `any` used to silence the compiler. Blocking work on
-the event loop. Dependency and lockfile drift. Secrets in client-side bundles.
-
-### Python
-
-Mutable default arguments. Bare `except`. Unpinned dependencies. Blocking I/O in async code.
-String-built SQL.
-
-### JVM
-
-Resources not closed (try-with-resources). Swallowed exceptions. N+1 in JPA/Hibernate. Mutable
-static state and thread-safety in singletons.
-
-### Go
-
-Ignored `error` returns. Goroutine leaks and missing context cancellation. Captured loop
-variables. `defer` inside a loop.
-
-### Ruby / PHP
-
-Mass assignment without strong parameters. N+1 in ActiveRecord/Eloquent. Unescaped output in
-views. Unsanitised input reaching a query.
-
-### Rust
-
-`unwrap`/`expect` on recoverable errors. `unsafe` without an invariant comment. Blocking calls in
-async contexts.
+Apply the checklist for the **detected stack only**. **Read `test-feature/stack-checklists.md` (next
+to this file) and use only the matching section** (.NET, JS/TS/Node, Python, JVM, Go, Ruby/PHP, Rust).
+If the stack is not listed there, apply the five mandatory vectors and say plainly that no
+stack-specific checklist was available — do not transplant one stack's idioms onto another.
 
 ---
 
@@ -358,4 +294,5 @@ For a cross-repo feature the report goes to `<container>/.claude/reports/TEST_RE
 ## Next step
 
 If the Correction Plan is non-empty, `/execute-plan` consumes it. If it is empty and the verdict
-is ship, `/cleanup-crew` prepares the pull request. Name the relevant one; do not invoke it.
+is ship, `/cleanup-crew` prepares the pull request (`/execute-plan` already ran it per approved
+milestone; this is the final pass). Name the relevant one; do not invoke it.
