@@ -6,3 +6,6 @@ __pycache__/
 .claude/plans/
 .claude/reports/
 .claude/roadmap.md
+.claude/handoff/
+.claude/browser/
+browser-runner/node_modules/

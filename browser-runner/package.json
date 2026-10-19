@@ -1,0 +1,15 @@
+{
+  "name": "browser-runner",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local Playwright runner for /kevin: drives a browser, writes snapshots/screenshots/console/network to files, prints a few-line summary.",
+  "bin": { "browser-runner": "runner.mjs" },
+  "scripts": {
+    "postinstall": "playwright install chromium",
+    "test": "node lib/session.test.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0"
+  }
+}

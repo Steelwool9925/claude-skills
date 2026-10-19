@@ -158,6 +158,52 @@ side effects.
   needing special-casing. A missing `prUrl` renders as `—`. A row missing `repo`/`branch`/`commit`/
   `pushResult` throws, naming the row and the missing field.
 
+## quiet-run
+
+`tooling/lib/quiet-run.mjs` — runs a noisy command (build, test, coverage) with its full output
+written to a file and returns only a few-line summary, keeping 10k+ line tool results out of the
+model's context. The model greps the file for detail instead of reading the stream.
+
+- `runToFile(root, command, outFile, { tailLines = 15, maxErrors = 10, timeoutMs })` → `{ exitCode,
+  outFile, lines, bytes, tail, errorLines }`. `errorLines` are `"<lineNo>: <text>"` for the first
+  lines matching error/fail/exception, so a follow-up read of `outFile` lands on the right spot. A
+  command that cannot start reports `exitCode: -1`.
+
+## coverage-summary
+
+`tooling/lib/coverage-summary.mjs` — condenses an `lcov.info` or Cobertura XML report (format
+sniffed from content) into overall %, Critical/Partial/Compliant buckets and per-file uncovered line
+ranges, so `test-feature` never reads a raw report.
+
+- `summarize(reportPath, { focus = [], threshold = 80 })` → `{ overall: { linePct, branchPct },
+  buckets, files }`, worst file first. `uncovered` ranges appear only for files whose path ends with
+  a `focus` entry (e.g. the plan manifest's changed files) or, with no `focus`, every non-Compliant
+  file.
+- Also exported: `toRanges`, `bucket`, `parseLcov`, `parseCobertura`.
+
+## ledger
+
+`tooling/lib/ledger.mjs` — builds `execute-plan` ledger lines and rolls the ledger up into the
+budget summary, replacing a re-read of the whole ledger.
+
+- Line builders (pure): `statLine`, `approvedLine`, `correctionsLine`, `testsLine`.
+- `appendLine(ledgerPath, line)` — appends one line.
+- `rollup(text, { ceiling = 350000, maxTaskTokens = 40000 })` / `rollupFile(path, opts)` → `{ tasks,
+  tokens, remaining, ceiling, nearCeiling, perRepo, rounds, approved, correctionRound }`. A task
+  logged in several fix rounds counts once in `tasks`, but every line's tokens count toward spend.
+  `nearCeiling` is true when `remaining <= maxTaskTokens` — the hard-stop-and-ask trigger.
+
+## roadmap
+
+`tooling/lib/roadmap.mjs` — reads and updates the `.claude/roadmap.md` register
+(`| Name | Title | Status | Plan |`) that `plan-feature` writes and `execute-plan --roadmap` walks.
+
+- `parseRoadmap(text)` → `[{ name, title, status, plan }]` in file order.
+- `selectRows(text)` / `selectRowsFile(path)` → `{ active, skippedFuture, done }`; `active` keeps
+  file order (the user's priority).
+- `setStatus(text, name, status)` / `setStatusFile(path, name, status)` — replaces one row's Status
+  cell; throws if the row does not exist.
+
 ## Running the tests
 
 ```

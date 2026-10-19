@@ -23,7 +23,11 @@ const MODULES = {
   'commit-composer': () => import(libUrl('commit-composer.mjs')),
   changelog: () => import(libUrl('changelog.mjs')),
   'plan-pruning': () => import(libUrl('plan-pruning.mjs')),
-  'cross-repo-table': () => import(libUrl('cross-repo-table.mjs'))
+  'cross-repo-table': () => import(libUrl('cross-repo-table.mjs')),
+  'quiet-run': () => import(libUrl('quiet-run.mjs')),
+  'coverage-summary': () => import(libUrl('coverage-summary.mjs')),
+  ledger: () => import(libUrl('ledger.mjs')),
+  roadmap: () => import(libUrl('roadmap.mjs'))
 }
 
 export function parseSpec (spec) {

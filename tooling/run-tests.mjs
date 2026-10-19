@@ -9,5 +9,9 @@ import './lib/commit-composer.test.mjs'
 import './lib/changelog.test.mjs'
 import './lib/plan-pruning.test.mjs'
 import './lib/cross-repo-table.test.mjs'
+import './lib/quiet-run.test.mjs'
+import './lib/coverage-summary.test.mjs'
+import './lib/ledger.test.mjs'
+import './lib/roadmap.test.mjs'
 
 process.exit(await run())
