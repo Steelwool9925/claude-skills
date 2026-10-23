@@ -50,6 +50,19 @@ marketplace plugin, so it is mine to version and nothing else would back it up.
 
 ---
 
+## Optional add-on — `claude-monitor`
+
+Not a skill and not part of the pipeline: a Windows background monitor for Claude Code terminal
+sessions. When a session's closing message tells you to `/clear` and read a handoff file, it sends
+`/clear` and then tells the fresh session to read the handoff. It is a .NET 10 daemon plus a Node
+`SessionStart` hook (`src/`, `hook/`, `tests/`, `docs/`, prebuilt binaries in `artifacts/`).
+
+It has no `SKILL.md`, so Claude Code never loads it, and it shares nothing with `_shared/` or
+`tooling/`. Skip it unless you want that behaviour. Build, test and hook-install steps are in
+[`claude-monitor/README.md`](claude-monitor/README.md).
+
+---
+
 ## Install on a new machine
 
 Skills are plain files; nothing syncs through the Claude account. Clone this repo *as* the
@@ -66,6 +79,7 @@ copy instead:
 git clone https://github.com/Steelwool9925/claude-skills.git /tmp/claude-skills
 cp -r /tmp/claude-skills/{execute-plan,plan-feature,test-feature,map-codebase,cleanup-crew,kevin,haiku-split} ~/.claude/skills/
 cp -r /tmp/claude-skills/ui-ux-pro-max ~/.claude/skills/   # optional — standalone, not pipeline
+cp -r /tmp/claude-skills/claude-monitor ~/.claude/skills/   # optional — Windows add-on, not a skill (see claude-monitor/README.md)
 cp -r /tmp/claude-skills/tooling ~/.claude/skills/
 mkdir -p ~/.claude/skills/_shared
 cp /tmp/claude-skills/_shared/{pipeline-contract.md,complexity-scoring.md} ~/.claude/skills/_shared/
